@@ -82,14 +82,29 @@ class AnalysisResult:
         }
 
 
-def _build_prompt(ticker: str, tenk_text: str, transcript_text: str) -> str:
+def _build_prompt(
+    ticker: str,
+    tenk_text: str,
+    transcript_text: str,
+    sector: str = "",
+    analyst_guidance: str = "",
+) -> str:
     tenk_snippet = tenk_text[:12_000] if tenk_text else "(not available)"
     transcript_snippet = transcript_text[:8_000] if transcript_text else "(not available)"
+
+    sector_block = ""
+    if sector:
+        sector_block = f"""--- COMPANY SECTOR ---
+Sector: {sector}
+Sector-specific analyst focus areas:
+{analyst_guidance}
+
+"""
 
     return f"""You are an experienced equity research analyst. Analyze the following
 source materials for {ticker} and produce a rigorous investment analysis.
 
---- 10-K EXCERPTS (MD&A + Risk Factors) ---
+{sector_block}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
 {tenk_snippet}
 
 --- LATEST EARNINGS CALL TRANSCRIPT ---
@@ -104,7 +119,13 @@ Based solely on these materials, use the `provide_investment_analysis` tool to r
 Ground every point in specific details from the documents above."""
 
 
-def analyze(ticker: str, tenk_text: str, transcript_text: str) -> AnalysisResult:
+def analyze(
+    ticker: str,
+    tenk_text: str,
+    transcript_text: str,
+    sector: str = "",
+    analyst_guidance: str = "",
+) -> AnalysisResult:
     """
     Send 10-K and transcript text to Claude and return a structured
     AnalysisResult with bull/bear arguments, downplayed risks, and a summary.

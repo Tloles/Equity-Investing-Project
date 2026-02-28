@@ -20,6 +20,8 @@ from pydantic import BaseModel
 
 from backend.analyzer import analyze
 from backend.dcf import fetch_dcf
+from backend.industry_classifier import fetch_sector_info
+from backend.industry_config import get_sector_rules
 from backend.sec_fetcher import fetch_10k_sections
 from backend.transcript_fetcher import fetch_latest_transcript
 
@@ -74,12 +76,17 @@ class AnalysisResponse(BaseModel):
     transcript_quarter: Optional[int] = None
     transcript_year: Optional[int] = None
 
+    # Sector / industry classification (best-effort — None if profile unavailable)
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
     # Price widget / DCF (best-effort — None if FMP data unavailable)
     dcf_available: bool
     current_price: Optional[float] = None
     intrinsic_value: Optional[float] = None
     upside_downside: Optional[float] = None
     dcf_model: Optional[DCFModel] = None
+    dcf_warning: Optional[str] = None
 
     # Claude analysis
     bull_case: list[str]
@@ -117,12 +124,24 @@ async def analyze_ticker(ticker: str):
     ticker = ticker.upper()
 
     # ------------------------------------------------------------------
-    # Steps 1–3: fetch 10-K, transcript, and DCF data concurrently
+    # Phase 0: sector classification (single fast call — result is used
+    # to adapt DCF assumptions and the Claude analysis prompt)
+    # ------------------------------------------------------------------
+    try:
+        sector_info = await asyncio.to_thread(fetch_sector_info, ticker)
+    except Exception as exc:
+        print(f"[main] sector info fetch failed — {type(exc).__name__}: {exc}")
+        sector_info = None
+
+    sector_rules = get_sector_rules(sector_info.sector if sector_info else "")
+
+    # ------------------------------------------------------------------
+    # Phase 1: fetch 10-K, transcript, and DCF data concurrently
     # ------------------------------------------------------------------
     results = await asyncio.gather(
         asyncio.to_thread(fetch_10k_sections, ticker),
         asyncio.to_thread(fetch_latest_transcript, ticker),
-        asyncio.to_thread(fetch_dcf, ticker),
+        asyncio.to_thread(fetch_dcf, ticker, sector_info),
         return_exceptions=True,
     )
     tenk_result, transcript_result, dcf_result = results
@@ -168,7 +187,9 @@ async def analyze_ticker(ticker: str):
 
     try:
         result = await asyncio.to_thread(
-            analyze, ticker, tenk_text, transcript_text
+            analyze, ticker, tenk_text, transcript_text,
+            sector_info.sector if sector_info else "",
+            sector_rules.analyst_guidance,
         )
     except EnvironmentError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -182,6 +203,8 @@ async def analyze_ticker(ticker: str):
         ticker=result.ticker,
         filing_date=tenk_data["filing_date"],
         cik=tenk_data["cik"],
+        sector=sector_info.sector if sector_info else None,
+        industry=sector_info.industry if sector_info else None,
         transcript_available=transcript_available,
         transcript_date=transcript_data["date"] if transcript_data else None,
         transcript_quarter=transcript_data["quarter"] if transcript_data else None,
@@ -209,6 +232,7 @@ async def analyze_ticker(ticker: str):
             equity_value=dcf_data.equity_value,
             shares_outstanding=dcf_data.shares_outstanding,
         ) if dcf_data else None,
+        dcf_warning=sector_rules.dcf_warning,
         bull_case=result.bull_case,
         bear_case=result.bear_case,
         downplayed_risks=result.downplayed_risks,

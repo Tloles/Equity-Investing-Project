@@ -436,6 +436,18 @@
     .bridge-row .bridge-sign { color: var(--muted); font-size: .8rem; margin-right: 6px; }
     .bridge-row.subtotal .bridge-sign { color: var(--text); }
 
+    /* DCF sector warning */
+    .dcf-warning {
+      background: var(--risk-bg);
+      border: 1.5px solid var(--risk-border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      font-size: .875rem;
+      color: #78350f;
+      line-height: 1.65;
+      margin-bottom: 20px;
+    }
+
     /* DCF unavailable */
     .dcf-unavailable {
       text-align: center;
@@ -542,6 +554,8 @@
       </div>
 
       <div id="dcf-content">
+        <div id="dcf-warning" class="dcf-warning" hidden></div>
+
         <p class="dcf-section-label">Assumptions</p>
         <div class="assumptions-grid" id="dcf-assumptions"></div>
 
@@ -625,10 +639,20 @@
       ? `<span class="meta-chip">Transcript <b>Q${data.transcript_quarter} ${data.transcript_year}</b></span>`
       : `<span class="meta-chip no-transcript"><b>No transcript available</b></span>`;
 
+    const sectorChip = data.sector
+      ? `<span class="meta-chip">Sector <b>${escapeHtml(data.sector)}</b></span>`
+      : '';
+
+    const industryChip = data.industry
+      ? `<span class="meta-chip">${escapeHtml(data.industry)}</span>`
+      : '';
+
     bar.innerHTML = `
       <span class="ticker-badge">${escapeHtml(data.ticker)}</span>
       <span class="meta-chip">10-K filed <b>${escapeHtml(data.filing_date)}</b></span>
       ${transcriptChip}
+      ${sectorChip}
+      ${industryChip}
     `;
   }
 
@@ -685,6 +709,15 @@
 
     hide(unavailable);
     show(content);
+
+    const warningEl = document.getElementById('dcf-warning');
+    if (data.dcf_warning) {
+      warningEl.textContent = data.dcf_warning;
+      show(warningEl);
+    } else {
+      hide(warningEl);
+    }
+
     const d = data.dcf_model;
 
     /* Assumptions */

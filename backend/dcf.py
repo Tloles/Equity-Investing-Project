@@ -8,7 +8,7 @@ Requires FMP_API_KEY in the environment (loaded from .env).
 
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import requests
 from dotenv import find_dotenv, load_dotenv
@@ -21,6 +21,8 @@ from .config import (
     TERMINAL_GROWTH_RATE,
 )
 from .market_data import get_equity_risk_premium, get_risk_free_rate
+from .industry_classifier import SectorInfo
+from .industry_config import SectorRules, get_sector_rules
 
 # Use find_dotenv() so the .env file is located by walking up from this file,
 # regardless of the working directory uvicorn was launched from.
@@ -101,7 +103,7 @@ def _fetch(endpoint: str, api_key: str, **params) -> list:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def fetch_dcf(ticker: str) -> DCFResult:
+def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResult:
     """
     Fetch FMP financial data and compute a 5-year DCF intrinsic value.
 
@@ -142,12 +144,21 @@ def fetch_dcf(ticker: str) -> DCFResult:
         if market_cap_quote <= 0:
             raise ValueError(f"marketCap is {quote.get('marketCap')!r} — missing or zero.")
         shares_outstanding = market_cap_quote / current_price
-        raw_beta           = float(quote.get("beta") or 0)
-        beta               = raw_beta if raw_beta > 0 else DEFAULT_BETA
-        print(f"[DCF] derived shares_outstanding={shares_outstanding:.0f}  beta={beta:.4f}")
+        # Prefer sector_info profile beta → quote beta → DEFAULT_BETA
+        profile_beta = sector_info.beta if sector_info else 0.0
+        quote_beta   = float(quote.get("beta") or 0)
+        raw_beta     = profile_beta if profile_beta > 0 else quote_beta
+        beta         = raw_beta if raw_beta > 0 else DEFAULT_BETA
+        print(f"[DCF] derived shares_outstanding={shares_outstanding:.0f}  "
+              f"profile_beta={profile_beta}  quote_beta={quote_beta}  beta={beta:.4f}")
     except Exception as exc:
         print(f"[DCF] FAILED step 2 (quote parsing): {type(exc).__name__}: {exc}")
         raise
+
+    # ── Sector rules ──────────────────────────────────────────────────────────
+    sector_label  = sector_info.sector if sector_info else ""
+    sector_rules: SectorRules = get_sector_rules(sector_label)
+    print(f"[DCF] sector={sector_label!r}  rules={sector_rules.sector_label}")
 
     # ── Step 3: extract revenue, FCF, and interest expense series ────────────
     try:
@@ -176,14 +187,20 @@ def fetch_dcf(ticker: str) -> DCFResult:
                 growth_rates.append((revenues[i] - revenues[i + 1]) / revenues[i + 1])
         if not growth_rates:
             raise ValueError(f"No positive prior-year revenues. revenues={revenues}")
-        # Descending weights: most recent (index 0) gets the highest weight
+        # Descending weights: most recent (index 0) gets the highest weight.
+        # Apply sector-specific recency bias to further emphasise recent performance.
         n = len(growth_rates)
-        weights = [n - i for i in range(n)]
+        weights = [float(n - i) for i in range(n)]
+        if sector_rules.growth_recency_bias != 1.0 and n > 0:
+            weights[0] *= sector_rules.growth_recency_bias
         total_weight = sum(weights)
         raw_growth = sum(w * g for w, g in zip(weights, growth_rates)) / total_weight
-        revenue_growth_rate = max(MIN_GROWTH_RATE, min(0.40, raw_growth))
+        revenue_growth_rate = max(
+            sector_rules.growth_floor, min(sector_rules.growth_cap, raw_growth)
+        )
         print(f"[DCF] growth_rates={growth_rates}  weighted_raw={raw_growth:.4f}  "
-              f"revenue_growth_rate={revenue_growth_rate:.4f}")
+              f"revenue_growth_rate={revenue_growth_rate:.4f}  "
+              f"(floor={sector_rules.growth_floor}, cap={sector_rules.growth_cap})")
     except Exception as exc:
         print(f"[DCF] FAILED step 4 (growth rate): {type(exc).__name__}: {exc}")
         raise
@@ -252,6 +269,10 @@ def fetch_dcf(ticker: str) -> DCFResult:
         debt_ratio   = (total_debt / total_cap) if total_cap > 0 else DEFAULT_DEBT_RATIO
         equity_ratio = 1.0 - debt_ratio
         wacc = equity_ratio * cost_of_equity + debt_ratio * cost_of_debt * (1.0 - TAX_RATE)
+        if sector_rules.wacc_cap is not None and wacc > sector_rules.wacc_cap:
+            print(f"[DCF] WACC {wacc:.4f} capped at {sector_rules.wacc_cap:.4f} "
+                  f"per {sector_rules.sector_label} sector rules")
+            wacc = sector_rules.wacc_cap
         if wacc <= TERMINAL_GROWTH:
             wacc = TERMINAL_GROWTH + 0.02
         print(f"[DCF] debt_ratio={debt_ratio:.4f}  equity_ratio={equity_ratio:.4f}  wacc={wacc:.4f}")
