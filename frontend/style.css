@@ -38,9 +38,9 @@ header {
   box-shadow: 0 2px 8px rgba(0,0,0,.18);
 }
 .header-inner {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 14px 24px;
+  padding: 14px 16px;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -89,9 +89,9 @@ header {
 
 /* ── Main ── */
 main {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 36px 24px 72px;
+  padding: 36px 16px 72px;
 }
 
 /* ── Empty state ── */
@@ -721,19 +721,25 @@ main {
   font-size: .9rem;
 }
 
-/* Porter's Five Forces grid */
+/* Porter's Five Forces grid — always one row of 5 equal cards */
 .porter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-template-columns: repeat(5, 1fr);
   gap: 14px;
   margin-bottom: 16px;
+}
+@media (max-width: 800px) {
+  .porter-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 520px) {
+  .porter-grid { grid-template-columns: 1fr 1fr; }
 }
 
 .porter-card {
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 18px 16px;
+  padding: 22px 20px;
   border-top: 3px solid var(--border);
 }
 

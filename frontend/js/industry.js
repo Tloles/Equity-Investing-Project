@@ -11,7 +11,7 @@ const PORTER_FORCES = [
 
 function _ratingClass(rating) {
   if (!rating) return '';
-  const r = rating.toLowerCase();
+  const r = String(rating).toLowerCase();
   if (r === 'low')    return 'low';
   if (r === 'medium') return 'medium';
   return 'high';
@@ -21,13 +21,15 @@ function _ratingClass(rating) {
 function renderPorterGrid(ia) {
   const grid = document.getElementById('porter-grid');
   grid.innerHTML = PORTER_FORCES.map(({ key, label }) => {
-    const force = ia[key] || {};
+    const force = (ia && ia[key]) ? ia[key] : {};
     const cls   = _ratingClass(force.rating);
+    const rating      = force.rating      ? String(force.rating)      : '—';
+    const explanation = force.explanation ? String(force.explanation) : '';
     return `
       <div class="porter-card">
         <div class="porter-force-name">${escapeHtml(label)}</div>
-        <div class="porter-rating ${cls}">${escapeHtml(force.rating || '—')}</div>
-        <div class="porter-explanation">${escapeHtml(force.explanation || '')}</div>
+        <div class="porter-rating ${cls}">${escapeHtml(rating)}</div>
+        <div class="porter-explanation">${escapeHtml(explanation)}</div>
       </div>`;
   }).join('');
 }
@@ -35,19 +37,47 @@ function renderPorterGrid(ia) {
 /* ── Render: Industry Structure (multi-paragraph) ── */
 function renderIndustryStructure(text) {
   const el = document.getElementById('industry-structure');
-  const paras = (text || '').split(/\n\n+/).filter(Boolean);
-  el.innerHTML = paras.map(p => `<p>${escapeHtml(p.trim())}</p>`).join('');
+  const str = text ? String(text) : '';
+  const paras = str.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+  if (paras.length === 0) {
+    el.innerHTML = '';
+  } else {
+    el.innerHTML = paras.map(p => `<p>${escapeHtml(p)}</p>`).join('');
+  }
 }
 
 /* ── Render: Key KPIs ── */
 function renderKPIs(kpis) {
   const list = document.getElementById('kpi-list');
-  list.innerHTML = (kpis || []).map(k => `
-    <li class="kpi-item">
-      <span class="kpi-metric">${escapeHtml(k.metric)}</span>
-      <span class="kpi-sep">—</span>
-      <span class="kpi-why">${escapeHtml(k.why_it_matters)}</span>
-    </li>`).join('');
+  const items = Array.isArray(kpis) ? kpis : [];
+  if (items.length === 0) {
+    list.innerHTML = '';
+    return;
+  }
+  list.innerHTML = items.map(k => {
+    const metric = k && k.metric           ? String(k.metric)           : '';
+    const why    = k && k.why_it_matters   ? String(k.why_it_matters)   : '';
+    if (!metric) return '';
+    return `
+      <li class="kpi-item">
+        <span class="kpi-metric">${escapeHtml(metric)}</span>
+        <span class="kpi-sep">—</span>
+        <span class="kpi-why">${escapeHtml(why)}</span>
+      </li>`;
+  }).filter(Boolean).join('');
+}
+
+/* ── Render: a numbered list of strings (tailwinds or headwinds) ── */
+function _renderStringList(listEl, items) {
+  const arr = Array.isArray(items) ? items : [];
+  if (arr.length === 0) {
+    listEl.innerHTML = '';
+    return;
+  }
+  listEl.innerHTML = arr.map((text, i) => {
+    const str = text ? String(text) : '';
+    return `<li><span class="num">${i + 1}</span><span>${escapeHtml(str)}</span></li>`;
+  }).join('');
 }
 
 /* ── Render: Industry tab ── */
@@ -55,7 +85,7 @@ function renderIndustry(data) {
   const unavailable = document.getElementById('industry-unavailable');
   const content     = document.getElementById('industry-content');
 
-  if (!data.industry_analysis) {
+  if (!data || !data.industry_analysis) {
     show(unavailable);
     hide(content);
     return;
@@ -69,11 +99,17 @@ function renderIndustry(data) {
   renderPorterGrid(ia);
   renderIndustryStructure(ia.industry_structure);
 
-  document.getElementById('competitive-position').textContent =
-    ia.competitive_position || '';
+  const posEl = document.getElementById('competitive-position');
+  posEl.textContent = ia.competitive_position ? String(ia.competitive_position) : '';
 
   renderKPIs(ia.key_kpis);
 
-  renderList(document.getElementById('tailwinds-list'), ia.tailwinds || []);
-  renderList(document.getElementById('headwinds-list'), ia.headwinds || []);
+  _renderStringList(
+    document.getElementById('tailwinds-list'),
+    ia.tailwinds,
+  );
+  _renderStringList(
+    document.getElementById('headwinds-list'),
+    ia.headwinds,
+  );
 }
