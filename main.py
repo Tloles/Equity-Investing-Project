@@ -39,6 +39,14 @@ app = FastAPI(
 
 
 class DCFModel(BaseModel):
+    # CAPM / cost-of-capital inputs
+    risk_free_rate: float
+    equity_risk_premium: float
+    beta: float
+    cost_of_equity: float
+    cost_of_debt: float
+
+    # Model assumptions
     revenue_growth_rate: float
     fcf_margin: float
     wacc: float
@@ -140,8 +148,15 @@ async def analyze_ticker(ticker: str):
     transcript_data: Optional[dict] = transcript_result if transcript_available else None  # type: ignore[assignment]
 
     # DCF is optional — degrade gracefully if FMP data is unavailable
-    dcf_available = not isinstance(dcf_result, Exception)
-    dcf_data = dcf_result if dcf_available else None  # type: ignore[assignment]
+    if isinstance(dcf_result, Exception):
+        print(f"[main] DCF failed — {type(dcf_result).__name__}: {dcf_result}")
+        dcf_available = False
+        dcf_data = None
+    else:
+        print(f"[main] DCF succeeded — intrinsic_value={dcf_result.intrinsic_value}, "  # type: ignore[union-attr]
+              f"current_price={dcf_result.current_price}")  # type: ignore[union-attr]
+        dcf_available = True
+        dcf_data = dcf_result  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Step 4: build combined text inputs and run Claude analysis
@@ -176,6 +191,11 @@ async def analyze_ticker(ticker: str):
         intrinsic_value=dcf_data.intrinsic_value if dcf_data else None,
         upside_downside=dcf_data.upside_downside if dcf_data else None,
         dcf_model=DCFModel(
+            risk_free_rate=dcf_data.risk_free_rate,
+            equity_risk_premium=dcf_data.equity_risk_premium,
+            beta=dcf_data.beta,
+            cost_of_equity=dcf_data.cost_of_equity,
+            cost_of_debt=dcf_data.cost_of_debt,
             revenue_growth_rate=dcf_data.revenue_growth_rate,
             fcf_margin=dcf_data.fcf_margin,
             wacc=dcf_data.wacc,

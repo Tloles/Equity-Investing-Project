@@ -336,6 +336,14 @@
     }
     @media (max-width: 600px) { .assumptions-grid { grid-template-columns: repeat(2, 1fr); } }
 
+    .wacc-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 600px) { .wacc-grid { grid-template-columns: repeat(2, 1fr); } }
+
     .assumption-card {
       background: var(--surface);
       border-radius: 10px;
@@ -537,6 +545,9 @@
         <p class="dcf-section-label">Assumptions</p>
         <div class="assumptions-grid" id="dcf-assumptions"></div>
 
+        <p class="dcf-section-label">Cost of Capital</p>
+        <div class="wacc-grid" id="dcf-wacc"></div>
+
         <p class="dcf-section-label">Projected Free Cash Flows</p>
         <div class="table-card">
           <table class="dcf-table">
@@ -693,6 +704,34 @@
       <div class="assumption-card">
         <div class="assumption-label">Terminal Growth</div>
         <div class="assumption-value">${fmtPct(d.terminal_growth_rate)}</div>
+      </div>
+    `;
+
+    /* Cost of capital breakdown */
+    document.getElementById('dcf-wacc').innerHTML = `
+      <div class="assumption-card">
+        <div class="assumption-label">Risk-Free Rate</div>
+        <div class="assumption-value">${fmtPct(d.risk_free_rate)}</div>
+      </div>
+      <div class="assumption-card">
+        <div class="assumption-label">Equity Risk Premium</div>
+        <div class="assumption-value">${fmtPct(d.equity_risk_premium)}</div>
+      </div>
+      <div class="assumption-card">
+        <div class="assumption-label">Beta</div>
+        <div class="assumption-value">${d.beta.toFixed(2)}</div>
+      </div>
+      <div class="assumption-card">
+        <div class="assumption-label">Cost of Equity</div>
+        <div class="assumption-value">${fmtPct(d.cost_of_equity)}</div>
+      </div>
+      <div class="assumption-card">
+        <div class="assumption-label">Cost of Debt</div>
+        <div class="assumption-value">${fmtPct(d.cost_of_debt)}</div>
+      </div>
+      <div class="assumption-card">
+        <div class="assumption-label">WACC</div>
+        <div class="assumption-value">${fmtPct(d.wacc)}</div>
       </div>
     `;
 
