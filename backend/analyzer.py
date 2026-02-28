@@ -7,6 +7,7 @@ Requires ANTHROPIC_API_KEY in the environment (loaded from .env).
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import anthropic
 from dotenv import find_dotenv, load_dotenv
@@ -375,25 +376,144 @@ def analyze_industry(
 
     d = tool_use_block.input
 
-    def _pf(key: str) -> PorterForce:
-        return PorterForce(
-            rating=d[key]["rating"],
-            explanation=d[key]["explanation"],
+    # ── Defensive key resolution helpers ──────────────────────────────────────
+
+    def _pick(candidates: list, default=None):
+        """Return d[first matching key] or default."""
+        for k in candidates:
+            if k in d:
+                return d[k]
+        return default
+
+    def _pick_nested(parent_candidates: list, child_candidates: list, default=None):
+        """
+        Try each parent key; if found, try each child key inside it.
+        Useful for Porter forces that may be nested under 'porter_five_forces'.
+        """
+        for pk in parent_candidates:
+            if pk in d and isinstance(d[pk], dict):
+                for ck in child_candidates:
+                    if ck in d[pk]:
+                        return d[pk][ck]
+        return default
+
+    def _pf(top_keys: list, nested_keys: Optional[list] = None) -> PorterForce:
+        """
+        Resolve a Porter force object.  Tries the top-level keys first; if not
+        found, falls back to looking inside a 'porter_five_forces' wrapper dict.
+        """
+        raw = _pick(top_keys)
+        if raw is None and nested_keys:
+            raw = _pick_nested(
+                ["porter_five_forces", "porters_five_forces", "five_forces"],
+                nested_keys,
+            )
+        if not isinstance(raw, dict):
+            raw = {}
+        rating = raw.get("rating") or raw.get("level") or raw.get("score") or "Medium"
+        explanation = (
+            raw.get("explanation")
+            or raw.get("description")
+            or raw.get("details")
+            or raw.get("analysis")
+            or ""
         )
+        return PorterForce(rating=rating, explanation=explanation)
+
+    def _parse_kpis(raw_list: list) -> list:
+        """Normalise KPI item dicts regardless of key names used."""
+        result = []
+        for item in (raw_list or []):
+            if not isinstance(item, dict):
+                continue
+            metric = (
+                item.get("metric")
+                or item.get("name")
+                or item.get("kpi")
+                or item.get("kpi_name")
+                or item.get("indicator")
+                or ""
+            )
+            why = (
+                item.get("why_it_matters")
+                or item.get("description")
+                or item.get("importance")
+                or item.get("rationale")
+                or item.get("why")
+                or item.get("reason")
+                or ""
+            )
+            if metric:
+                result.append(IndustryKPI(metric=metric, why_it_matters=why))
+        return result
+
+    # ── Resolve each field with fallback aliases ───────────────────────────────
+
+    threat_new_entrants = _pf(
+        ["threat_of_new_entrants", "new_entrants", "threat_new_entrants", "entrants"],
+        ["threat_of_new_entrants", "new_entrants"],
+    )
+    supplier_power = _pf(
+        ["bargaining_power_of_suppliers", "supplier_power", "suppliers",
+         "bargaining_power_suppliers"],
+        ["bargaining_power_of_suppliers", "supplier_power", "suppliers"],
+    )
+    buyer_power = _pf(
+        ["bargaining_power_of_buyers", "buyer_power", "buyers",
+         "bargaining_power_buyers", "customer_power"],
+        ["bargaining_power_of_buyers", "buyer_power", "buyers"],
+    )
+    threat_subs = _pf(
+        ["threat_of_substitutes", "substitutes", "threat_substitutes",
+         "substitute_products"],
+        ["threat_of_substitutes", "substitutes"],
+    )
+    rivalry = _pf(
+        ["competitive_rivalry", "rivalry", "industry_rivalry",
+         "rivalry_among_competitors"],
+        ["competitive_rivalry", "rivalry"],
+    )
+
+    industry_structure = _pick(
+        ["industry_structure", "structure", "industry_overview",
+         "market_structure", "overview"],
+        default="",
+    )
+
+    competitive_position = _pick(
+        ["competitive_position", "position", "company_position",
+         "competitive_positioning", "competitive_standing"],
+        default="",
+    )
+
+    raw_kpis = _pick(
+        ["key_kpis", "kpis", "key_metrics", "industry_kpis",
+         "metrics", "key_performance_indicators"],
+        default=[],
+    )
+
+    tailwinds = _pick(
+        ["tailwinds", "industry_tailwinds", "macro_tailwinds",
+         "growth_drivers", "positive_trends"],
+        default=[],
+    )
+
+    headwinds = _pick(
+        ["headwinds", "industry_headwinds", "macro_headwinds",
+         "risks", "negative_trends", "challenges"],
+        default=[],
+    )
 
     return IndustryAnalysisResult(
         ticker=ticker.upper(),
-        threat_of_new_entrants=_pf("threat_of_new_entrants"),
-        bargaining_power_of_suppliers=_pf("bargaining_power_of_suppliers"),
-        bargaining_power_of_buyers=_pf("bargaining_power_of_buyers"),
-        threat_of_substitutes=_pf("threat_of_substitutes"),
-        competitive_rivalry=_pf("competitive_rivalry"),
-        industry_structure=d["industry_structure"],
-        competitive_position=d["competitive_position"],
-        key_kpis=[
-            IndustryKPI(metric=k["metric"], why_it_matters=k["why_it_matters"])
-            for k in d["key_kpis"]
-        ],
-        tailwinds=d["tailwinds"],
-        headwinds=d["headwinds"],
+        threat_of_new_entrants=threat_new_entrants,
+        bargaining_power_of_suppliers=supplier_power,
+        bargaining_power_of_buyers=buyer_power,
+        threat_of_substitutes=threat_subs,
+        competitive_rivalry=rivalry,
+        industry_structure=industry_structure if isinstance(industry_structure, str) else str(industry_structure),
+        competitive_position=competitive_position if isinstance(competitive_position, str) else str(competitive_position),
+        key_kpis=_parse_kpis(raw_kpis) if isinstance(raw_kpis, list) else [],
+        tailwinds=[str(t) for t in tailwinds] if isinstance(tailwinds, list) else [],
+        headwinds=[str(h) for h in headwinds] if isinstance(headwinds, list) else [],
     )
