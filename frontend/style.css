@@ -331,11 +331,11 @@ main {
 
 .wacc-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 24px;
 }
-@media (max-width: 600px) { .wacc-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) { .wacc-grid { grid-template-columns: repeat(2, 1fr); } }
 
 .assumption-card {
   background: var(--surface);
@@ -500,7 +500,7 @@ main {
   width: 100%;
   border-collapse: collapse;
   font-size: .82rem;
-  min-width: 580px;
+  min-width: 960px;
 }
 
 .dcf-proj-table thead tr { background: #f8fafc; }
@@ -536,9 +536,28 @@ main {
   color: #64748b;
 }
 
+/* Section separator rows */
+.dcf-proj-table tr.section-header td {
+  background: #e8edf5;
+  color: var(--navy);
+  font-size: .65rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* Bold data rows */
 .dcf-proj-table tr.row-bold td { font-weight: 600; }
 .dcf-proj-table tr.row-bold td:first-child { font-weight: 700; }
+
+/* Net Income / EPS highlight rows */
+.dcf-proj-table tr.row-highlight td {
+  background: #f8fafc;
+  border-top: 1.5px solid var(--border);
+}
+.dcf-proj-table tr.row-highlight td.col-actual { background: #f1f5f9; }
 
 /* Italic % driver rows */
 .dcf-proj-table tr.row-italic td {

@@ -1,4 +1,4 @@
-/* dcf.js — renders the DCF tab: projection table, cost of capital, valuation bridge */
+/* dcf.js — financial model: Income Statement, FCF, Balance Sheet, Terminal Value */
 
 /* ── Format helpers ── */
 
@@ -22,7 +22,7 @@ function fmtPct(decimal) {
   return (decimal * 100).toFixed(1) + '%';
 }
 
-/* Format a raw USD value as millions with comma separators, e.g. 385600000000 → "385,600" */
+/* Raw USD → millions with comma separators, e.g. 385_600_000_000 → "385,600" */
 function fmtM(rawUSD) {
   const m       = rawUSD / 1e6;
   const sign    = m < 0 ? '-' : '';
@@ -35,171 +35,234 @@ function fmtMParen(rawUSD) {
   return '(' + fmtM(Math.abs(rawUSD)) + ')';
 }
 
+/* Diluted shares shown in millions */
+function fmtSharesM(shares) {
+  if (shares == null) return '—';
+  const m = Math.round(Math.abs(shares) / 1e6);
+  return m.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/* EPS in dollars per share */
+function fmtEPS(eps) {
+  if (eps == null) return '—';
+  const abs = Math.abs(eps);
+  return (eps < 0 ? '($' : '$') + abs.toFixed(2) + (eps < 0 ? ')' : '');
+}
+
+/* P/E exit multiple */
+function fmtMultiple(value) {
+  return value.toFixed(1) + 'x';
+}
+
+/* Return '—' when value is null/undefined/NaN, else apply formatFn */
+function dash(value, formatFn) {
+  return (value == null || isNaN(value)) ? '—' : formatFn(value);
+}
+
 
 /* ── Module state ── */
 
 let _dcfState = null;   // projection table state + defaults snapshot
-let _fullData  = null;   // original full API response
+let _fullData  = null;  // original full API response
 
 
 /* ── State initialisation ── */
 
 function _defaultAssumptions(d) {
-  const bRev  = d.base_revenue;
-  const bGP   = d.base_gross_profit;
-  const bOpex = d.base_operating_expenses;
-  const bEbit = d.base_ebit;
-  const bTax  = d.base_tax_expense;
   return {
-    growthRates: Array(5).fill(d.revenue_growth_rate),
-    gpMargins:   Array(5).fill(bRev  > 0 ? bGP   / bRev  : 0.5),
-    opexPcts:    Array(5).fill(bRev  > 0 ? bOpex / bRev  : 0.15),
-    taxRates:    Array(5).fill(bEbit > 0 ? bTax  / bEbit : 0.21),
-    fcfMargins:  Array(5).fill(d.fcf_margin),
+    growthRates:   Array(5).fill(d.base_revenue_growth),
+    opMargins:     Array(5).fill(d.base_op_margin),
+    taxRates:      Array(5).fill(d.base_tax_rate),
+    capexPcts:     Array(5).fill(d.base_capex_pct),
+    daPcts:        Array(5).fill(d.base_da_pct),
+    sharesGrowths: Array(5).fill(d.base_shares_growth),
+    exitPeMultiple: d.exit_pe_multiple,
   };
 }
 
 function initState(data) {
-  const d = data.dcf_model;
+  const d        = data.dcf_model;
   const defaults = _defaultAssumptions(d);
 
-  _fullData  = data;
-  _dcfState  = {
-    ticker:   data.ticker,
-    baseYear: d.base_year,
+  _fullData = data;
+  _dcfState = {
+    ticker:  data.ticker,
+    actuals: d.actuals,          // historical year objects (oldest → newest)
 
-    /* base-year actuals (raw USD) */
-    baseRevenue:       d.base_revenue,
-    baseCostOfRevenue: d.base_cost_of_revenue,
-    baseGrossProfit:   d.base_gross_profit,
-    baseOpex:          d.base_operating_expenses,
-    baseEbit:          d.base_ebit,
-    baseTax:           d.base_tax_expense,
-    baseFcf:           d.base_fcf_actual,
+    /* base values — last actual year, used as Year-0 for projections */
+    baseRevenue:        d.actuals[d.actuals.length - 1].revenue,
+    baseDilutedShares:  d.base_diluted_shares,
+    interestExpense:    d.base_interest_expense,  // fixed in projections
+    costOfEquity:       d.cost_of_equity,
+    currentPrice:       data.current_price,
 
-    /* per-year projection assumptions */
-    ...defaults,
+    /* per-year projection assumptions — deep-copied so defaults snapshot is safe */
+    growthRates:    [...defaults.growthRates],
+    opMargins:      [...defaults.opMargins],
+    taxRates:       [...defaults.taxRates],
+    capexPcts:      [...defaults.capexPcts],
+    daPcts:         [...defaults.daPcts],
+    sharesGrowths:  [...defaults.sharesGrowths],
+    exitPeMultiple: defaults.exitPeMultiple,
 
     /* which cells the user has manually overridden */
     overridden: {
-      growthRates: Array(5).fill(false),
-      gpMargins:   Array(5).fill(false),
-      opexPcts:    Array(5).fill(false),
-      taxRates:    Array(5).fill(false),
-      fcfMargins:  Array(5).fill(false),
+      growthRates:   Array(5).fill(false),
+      opMargins:     Array(5).fill(false),
+      taxRates:      Array(5).fill(false),
+      capexPcts:     Array(5).fill(false),
+      daPcts:        Array(5).fill(false),
+      sharesGrowths: Array(5).fill(false),
+      exitPe:        false,
     },
 
-    /* saved defaults (used by Reset) */
+    /* saved defaults for Reset — never mutated after this point */
     defaults,
-
-    /* DCF constants for /dcf/recalculate */
-    wacc:              d.wacc,
-    terminalGrowthRate: d.terminal_growth_rate,
-    netCash:           d.net_cash,
-    sharesOutstanding: d.shares_outstanding,
-    currentPrice:      data.current_price,
   };
 }
 
 
 /* ── Projection computation ── */
 
+/*
+ * Computes all 5 projection years from current state.
+ * Returns { rows, tv, pvTv, pvFcfs, equityValue, iv, upside }.
+ */
 function computeProjections(s) {
-  const rows = [];
-  let prevRevenue = s.baseRevenue;
+  let prevRev    = s.baseRevenue;
+  let prevShares = s.baseDilutedShares;
+  const rows     = [];
+  let pvFcfs     = 0.0;
+
   for (let i = 0; i < 5; i++) {
-    const revenue     = prevRevenue * (1 + s.growthRates[i]);
-    const grossProfit = revenue * s.gpMargins[i];
-    const cor         = revenue - grossProfit;
-    const opex        = revenue * s.opexPcts[i];
-    const ebit        = grossProfit - opex;
-    const taxExpense  = ebit > 0 ? ebit * s.taxRates[i] : 0;
-    const fcf         = revenue * s.fcfMargins[i];
+    const revenue   = prevRev * (1 + s.growthRates[i]);
+    const opIncome  = revenue * s.opMargins[i];
+    const intExp    = s.interestExpense;                          // fixed
+    const pretax    = opIncome - intExp;
+    const tax       = pretax > 0 ? pretax * s.taxRates[i] : 0;
+    const netIncome = pretax - tax;
+    const shares    = prevShares * (1 + s.sharesGrowths[i]);
+    const eps       = shares > 0 ? netIncome / shares : 0;
+    const capex     = revenue * s.capexPcts[i];
+    const da        = revenue * s.daPcts[i];
+    const fcf       = netIncome + da - capex;
+    const pv        = fcf / Math.pow(1 + s.costOfEquity, i + 1);
+    pvFcfs         += pv;
+
     rows.push({
-      revenue, grossProfit, cor, opex, ebit, taxExpense, fcf,
-      growthRate: s.growthRates[i],
-      corPct:     1 - s.gpMargins[i],
-      gpMargin:   s.gpMargins[i],
-      opexPct:    s.opexPcts[i],
-      ebitMargin: revenue > 0 ? ebit / revenue : 0,
-      taxRate:    s.taxRates[i],
-      fcfMargin:  s.fcfMargins[i],
+      revenue, opIncome, intExp, pretax, tax, netIncome, shares, eps,
+      capex, da, fcf,
+      /* ratios for editable cell display */
+      growthRate:   s.growthRates[i],
+      opMargin:     s.opMargins[i],
+      taxRate:      s.taxRates[i],
+      capexPct:     s.capexPcts[i],
+      daPct:        s.daPcts[i],
+      sharesGrowth: s.sharesGrowths[i],
     });
-    prevRevenue = revenue;
+
+    prevRev    = revenue;
+    prevShares = shares;
   }
-  return rows;
+
+  /* Terminal value = Year-5 Net Income × P/E exit multiple */
+  const tv          = rows[4].netIncome * s.exitPeMultiple;
+  const pvTv        = tv / Math.pow(1 + s.costOfEquity, 5);
+  const equityValue = pvFcfs + pvTv;
+  const iv          = s.baseDilutedShares > 0 ? equityValue / s.baseDilutedShares : 0;
+  const upside      = s.currentPrice > 0 ? (iv - s.currentPrice) / s.currentPrice * 100 : 0;
+
+  return { rows, tv, pvTv, pvFcfs, equityValue, iv, upside };
 }
 
 
 /* ── State mutation ── */
 
-function getCellPct(field, year) {
+/* Returns the current value of an editable cell (decimal for %, raw for P/E) */
+function getCellValue(field, year) {
   const s = _dcfState;
   switch (field) {
-    case 'growthRate':  return s.growthRates[year];
-    case 'corPct':      return 1 - s.gpMargins[year];
-    case 'gpMargin':    return s.gpMargins[year];
-    case 'opexPct':     return s.opexPcts[year];
-    case 'ebitMargin':  return s.gpMargins[year] - s.opexPcts[year];
-    case 'taxRate':     return s.taxRates[year];
-    case 'fcfMargin':   return s.fcfMargins[year];
-    default:            return 0;
+    case 'growthRate':   return s.growthRates[year];
+    case 'opMargin':     return s.opMargins[year];
+    case 'taxRate':      return s.taxRates[year];
+    case 'capexPct':     return s.capexPcts[year];
+    case 'daPct':        return s.daPcts[year];
+    case 'sharesGrowth': return s.sharesGrowths[year];
+    case 'exitPe':       return s.exitPeMultiple;
+    default:             return 0;
   }
 }
 
+/* Applies a committed edit to state */
 function applyCellEdit(field, year, value) {
   const s = _dcfState;
   switch (field) {
-    case 'growthRate':
-      s.growthRates[year] = value;
-      s.overridden.growthRates[year] = true;
-      break;
-    case 'corPct':
-      s.gpMargins[year] = 1 - value;
-      s.overridden.gpMargins[year] = true;
-      break;
-    case 'gpMargin':
-      s.gpMargins[year] = value;
-      s.overridden.gpMargins[year] = true;
-      break;
-    case 'opexPct':
-      s.opexPcts[year] = value;
-      s.overridden.opexPcts[year] = true;
-      break;
-    case 'ebitMargin':
-      s.opexPcts[year] = s.gpMargins[year] - value;
-      s.overridden.opexPcts[year] = true;
-      break;
-    case 'taxRate':
-      s.taxRates[year] = value;
-      s.overridden.taxRates[year] = true;
-      break;
-    case 'fcfMargin':
-      s.fcfMargins[year] = value;
-      s.overridden.fcfMargins[year] = true;
-      break;
+    case 'growthRate':   s.growthRates[year]   = value; s.overridden.growthRates[year]   = true; break;
+    case 'opMargin':     s.opMargins[year]     = value; s.overridden.opMargins[year]     = true; break;
+    case 'taxRate':      s.taxRates[year]      = value; s.overridden.taxRates[year]      = true; break;
+    case 'capexPct':     s.capexPcts[year]     = value; s.overridden.capexPcts[year]     = true; break;
+    case 'daPct':        s.daPcts[year]        = value; s.overridden.daPcts[year]        = true; break;
+    case 'sharesGrowth': s.sharesGrowths[year] = value; s.overridden.sharesGrowths[year] = true; break;
+    case 'exitPe':       s.exitPeMultiple      = value; s.overridden.exitPe              = true; break;
   }
 }
 
+/* Is this specific cell overridden by the user? */
 function isCellOverridden(field, year) {
   const ov = _dcfState.overridden;
   switch (field) {
-    case 'growthRate':            return ov.growthRates[year];
-    case 'corPct': case 'gpMargin': return ov.gpMargins[year];
-    case 'opexPct': case 'ebitMargin': return ov.opexPcts[year];
-    case 'taxRate':               return ov.taxRates[year];
-    case 'fcfMargin':             return ov.fcfMargins[year];
-    default:                      return false;
+    case 'growthRate':   return ov.growthRates[year];
+    case 'opMargin':     return ov.opMargins[year];
+    case 'taxRate':      return ov.taxRates[year];
+    case 'capexPct':     return ov.capexPcts[year];
+    case 'daPct':        return ov.daPcts[year];
+    case 'sharesGrowth': return ov.sharesGrowths[year];
+    case 'exitPe':       return ov.exitPe;
+    default:             return false;
   }
 }
 
+/* Maps field name to the key inside s.overridden */
+function _overriddenKey(field) {
+  switch (field) {
+    case 'growthRate':   return 'growthRates';
+    case 'opMargin':     return 'opMargins';
+    case 'taxRate':      return 'taxRates';
+    case 'capexPct':     return 'capexPcts';
+    case 'daPct':        return 'daPcts';
+    case 'sharesGrowth': return 'sharesGrowths';
+    case 'exitPe':       return 'exitPe';   // boolean, not array
+    default:             return 'growthRates';
+  }
+}
 
-/* ── Surgical DOM update (used during live typing) ── */
+/* Is this field a percentage (true) or a raw numeric multiple (false)? */
+function _isPctField(field) { return field !== 'exitPe'; }
 
-/*
- * Sets the text content of a value cell (bold rows) identified by
- * data-val + data-year.  Never touches editable (italic) cells.
- */
+/* Format a cell value for display */
+function _formatCellValue(field, value) {
+  return _isPctField(field) ? fmtPct(value) : fmtMultiple(value);
+}
+
+/* Parse user input to the stored decimal/number value */
+function _parseInput(field, rawStr) {
+  const cleaned = rawStr.replace('%', '').replace('x', '').trim();
+  const num = parseFloat(cleaned);
+  if (isNaN(num)) return null;
+  return _isPctField(field) ? num / 100 : num;
+}
+
+/* Initial input display value (without % or x suffix) */
+function _inputDisplayValue(field, value) {
+  return _isPctField(field)
+    ? (value * 100).toFixed(1)
+    : value.toFixed(1);
+}
+
+
+/* ── Surgical DOM update (no full re-render while input is active) ── */
+
+/* Update a value cell in a projection column by data-val + data-year */
 function setVal(valType, year, content) {
   const cell = document.querySelector(
     `#dcf-projection [data-val="${valType}"][data-year="${year}"]`
@@ -207,10 +270,7 @@ function setVal(valType, year, content) {
   if (cell) cell.textContent = content;
 }
 
-/*
- * Sets the text content + class of an editable cell, but only if the
- * cell is not currently open for editing (i.e. has no <input> child).
- */
+/* Update an editable italic cell — skips if an <input> is currently open */
 function setEditable(field, year, content, overridden) {
   const cell = document.querySelector(
     `#dcf-projection [data-field="${field}"][data-year="${year}"]`
@@ -220,161 +280,259 @@ function setEditable(field, year, content, overridden) {
   cell.textContent = content;
 }
 
-/*
- * After any state change, push updated values to all table cells without
- * replacing the DOM structure (preserves the active <input> element).
- */
-function updateTableCells(projs) {
+/* Push all computed values to the DOM without rebuilding the HTML structure */
+function updateTableCells(result) {
   const s = _dcfState;
   for (let i = 0; i < 5; i++) {
-    const p = projs[i];
+    const p = result.rows[i];
 
-    /* value cells (bold rows) */
-    setVal('revenue',     i, fmtM(p.revenue));
-    setVal('cor',         i, fmtMParen(p.cor));
-    setVal('grossProfit', i, fmtM(p.grossProfit));
-    setVal('opex',        i, fmtMParen(p.opex));
-    setVal('ebit',        i, fmtM(p.ebit));
-    setVal('taxExpense',  i, fmtMParen(p.taxExpense));
-    setVal('fcf',         i, fmtM(p.fcf));
+    /* value cells */
+    setVal('revenue',   i, fmtM(p.revenue));
+    setVal('opIncome',  i, fmtM(p.opIncome));
+    setVal('intExp',    i, fmtMParen(p.intExp));
+    setVal('pretax',    i, fmtM(p.pretax));
+    setVal('tax',       i, fmtMParen(p.tax));
+    setVal('netIncome', i, fmtM(p.netIncome));
+    setVal('shares',    i, fmtSharesM(p.shares));
+    setVal('eps',       i, fmtEPS(p.eps));
+    setVal('capex',     i, fmtMParen(p.capex));
+    setVal('da',        i, fmtM(p.da));
+    setVal('fcf',       i, fmtM(p.fcf));
 
-    /* editable % cells — all recalculated; active input is skipped by setEditable */
-    setEditable('growthRate', i, fmtPct(p.growthRate), isCellOverridden('growthRate', i));
-    setEditable('corPct',     i, fmtPct(p.corPct),     isCellOverridden('corPct',     i));
-    setEditable('gpMargin',   i, fmtPct(p.gpMargin),   isCellOverridden('gpMargin',   i));
-    setEditable('opexPct',    i, fmtPct(p.opexPct),    isCellOverridden('opexPct',    i));
-    setEditable('ebitMargin', i, fmtPct(p.ebitMargin), isCellOverridden('ebitMargin', i));
-    setEditable('taxRate',    i, fmtPct(p.taxRate),    isCellOverridden('taxRate',    i));
-    setEditable('fcfMargin',  i, fmtPct(p.fcfMargin),  isCellOverridden('fcfMargin',  i));
+    /* editable cells — active <input> is safely skipped by setEditable */
+    setEditable('growthRate',   i, fmtPct(p.growthRate),   isCellOverridden('growthRate',   i));
+    setEditable('opMargin',     i, fmtPct(p.opMargin),     isCellOverridden('opMargin',     i));
+    setEditable('taxRate',      i, fmtPct(p.taxRate),      isCellOverridden('taxRate',      i));
+    setEditable('capexPct',     i, fmtPct(p.capexPct),     isCellOverridden('capexPct',     i));
+    setEditable('daPct',        i, fmtPct(p.daPct),        isCellOverridden('daPct',        i));
+    setEditable('sharesGrowth', i, fmtPct(p.sharesGrowth), isCellOverridden('sharesGrowth', i));
   }
+  /* P/E exit multiple (year index 4) and terminal value */
+  setEditable('exitPe', 4, fmtMultiple(s.exitPeMultiple), s.overridden.exitPe);
+  setVal('terminalValue', 4, fmtUSD(result.tv));
+
+  /* Live price widget and bridge update */
+  _updatePriceWidget(result.iv, result.upside, s.currentPrice);
+  renderValuationBridge(result.pvFcfs, result.pvTv, result.equityValue,
+                        s.baseDilutedShares, result.iv);
 }
 
 
 /* ── Cell builder helpers ── */
 
-function editableTd(field, year, displayPct) {
-  const cls = 'cell-editable' + (isCellOverridden(field, year) ? ' cell-overridden' : '');
-  return `<td class="${cls}" data-field="${field}" data-year="${year}">${fmtPct(displayPct)}</td>`;
+function editableTd(field, year, value) {
+  const ovr = isCellOverridden(field, year);
+  const cls = 'cell-editable' + (ovr ? ' cell-overridden' : '');
+  return `<td class="${cls}" data-field="${field}" data-year="${year}">${_formatCellValue(field, value)}</td>`;
 }
 
-function actualTd(content) {
+function actTd(content) {
   return `<td class="col-actual">${content}</td>`;
 }
 
+function actTds(actuals, valueFn) {
+  return actuals.map(valueFn).map(actTd).join('');
+}
 
-/* ── Table row builders ── */
+function projValTd(type, i, content) {
+  return `<td data-val="${type}" data-year="${i}">${content}</td>`;
+}
 
-function buildTableRows(s, projs) {
-  /* helpers */
-  const projTds = (fn) => projs.map((p, i) => fn(p, i)).join('');
-  const valTd   = (valType, i, content) =>
-    `<td data-val="${valType}" data-year="${i}">${content}</td>`;
 
+/* ── Table section builders ── */
+
+function _sectionHeader(label, numCols) {
+  return `<tr class="section-header"><td colspan="${numCols}">${label}</td></tr>`;
+}
+
+function _incomeRows(s, projs) {
+  const act = s.actuals;
   return `
-    <!-- ── Revenue ── -->
     <tr class="row-bold">
       <td>Revenue</td>
-      ${actualTd(fmtM(s.baseRevenue))}
-      ${projTds((p, i) => valTd('revenue', i, fmtM(p.revenue)))}
+      ${actTds(act, a => fmtM(a.revenue))}
+      ${projs.map((p, i) => projValTd('revenue', i, fmtM(p.revenue))).join('')}
     </tr>
     <tr class="row-italic">
       <td>% Growth</td>
-      ${actualTd('—')}
-      ${projTds((p, i) => editableTd('growthRate', i, p.growthRate))}
+      ${actTds(act, a => dash(a.revenue_growth, fmtPct))}
+      ${projs.map((p, i) => editableTd('growthRate', i, p.growthRate)).join('')}
     </tr>
 
-    <!-- ── Cost of Revenue ── -->
-    <tr class="row-body row-cost">
-      <td>Cost of Revenue</td>
-      ${actualTd(fmtMParen(s.baseCostOfRevenue))}
-      ${projTds((p, i) => valTd('cor', i, fmtMParen(p.cor)))}
-    </tr>
-    <tr class="row-italic">
-      <td>% of Revenue</td>
-      ${actualTd(fmtPct(s.baseRevenue > 0 ? s.baseCostOfRevenue / s.baseRevenue : 0))}
-      ${projTds((p, i) => editableTd('corPct', i, p.corPct))}
-    </tr>
-
-    <!-- ── Gross Profit ── -->
     <tr class="row-bold">
-      <td>Gross Profit</td>
-      ${actualTd(fmtM(s.baseGrossProfit))}
-      ${projTds((p, i) => valTd('grossProfit', i, fmtM(p.grossProfit)))}
+      <td>Operating Income</td>
+      ${actTds(act, a => fmtM(a.operating_income))}
+      ${projs.map((p, i) => projValTd('opIncome', i, fmtM(p.opIncome))).join('')}
     </tr>
     <tr class="row-italic">
-      <td>% Margin</td>
-      ${actualTd(fmtPct(s.baseRevenue > 0 ? s.baseGrossProfit / s.baseRevenue : 0))}
-      ${projTds((p, i) => editableTd('gpMargin', i, p.gpMargin))}
+      <td>Operating Margin %</td>
+      ${actTds(act, a => a.revenue > 0 ? fmtPct(a.operating_income / a.revenue) : '—')}
+      ${projs.map((p, i) => editableTd('opMargin', i, p.opMargin)).join('')}
     </tr>
 
-    <!-- ── Operating Expenses ── -->
     <tr class="row-body row-cost">
-      <td>Operating Expenses</td>
-      ${actualTd(fmtMParen(s.baseOpex))}
-      ${projTds((p, i) => valTd('opex', i, fmtMParen(p.opex)))}
-    </tr>
-    <tr class="row-italic">
-      <td>% of Revenue</td>
-      ${actualTd(fmtPct(s.baseRevenue > 0 ? s.baseOpex / s.baseRevenue : 0))}
-      ${projTds((p, i) => editableTd('opexPct', i, p.opexPct))}
+      <td>Interest Expense</td>
+      ${actTds(act, a => fmtMParen(a.interest_expense))}
+      ${projs.map((p, i) => projValTd('intExp', i, fmtMParen(p.intExp))).join('')}
     </tr>
 
-    <!-- ── EBIT ── -->
     <tr class="row-bold">
-      <td>EBIT</td>
-      ${actualTd(fmtM(s.baseEbit))}
-      ${projTds((p, i) => valTd('ebit', i, fmtM(p.ebit)))}
-    </tr>
-    <tr class="row-italic">
-      <td>% Margin</td>
-      ${actualTd(fmtPct(s.baseRevenue > 0 ? s.baseEbit / s.baseRevenue : 0))}
-      ${projTds((p, i) => editableTd('ebitMargin', i, p.ebitMargin))}
+      <td>Pre-tax Income</td>
+      ${actTds(act, a => fmtM(a.pretax_income))}
+      ${projs.map((p, i) => projValTd('pretax', i, fmtM(p.pretax))).join('')}
     </tr>
 
-    <!-- ── Tax Expense ── -->
     <tr class="row-body row-cost">
       <td>Tax Expense</td>
-      ${actualTd(fmtMParen(s.baseTax))}
-      ${projTds((p, i) => valTd('taxExpense', i, fmtMParen(p.taxExpense)))}
+      ${actTds(act, a => fmtMParen(a.tax_expense))}
+      ${projs.map((p, i) => projValTd('tax', i, fmtMParen(p.tax))).join('')}
     </tr>
     <tr class="row-italic">
-      <td>Tax Rate</td>
-      ${actualTd(fmtPct(s.baseEbit > 0 ? s.baseTax / s.baseEbit : 0))}
-      ${projTds((p, i) => editableTd('taxRate', i, p.taxRate))}
+      <td>Tax Rate %</td>
+      ${actTds(act, a => a.pretax_income > 0 ? fmtPct(a.tax_expense / a.pretax_income) : '—')}
+      ${projs.map((p, i) => editableTd('taxRate', i, p.taxRate)).join('')}
     </tr>
 
-    <!-- ── Free Cash Flow ── -->
-    <tr class="row-bold row-fcf">
-      <td>Free Cash Flow</td>
-      ${actualTd(fmtM(s.baseFcf))}
-      ${projTds((p, i) => valTd('fcf', i, fmtM(p.fcf)))}
+    <tr class="row-bold row-highlight">
+      <td>Net Income</td>
+      ${actTds(act, a => fmtM(a.net_income))}
+      ${projs.map((p, i) => projValTd('netIncome', i, fmtM(p.netIncome))).join('')}
     </tr>
-    <tr class="row-italic row-fcf-italic">
-      <td>% Margin</td>
-      ${actualTd(fmtPct(s.baseRevenue > 0 ? s.baseFcf / s.baseRevenue : 0))}
-      ${projTds((p, i) => editableTd('fcfMargin', i, p.fcfMargin))}
+
+    <tr class="row-body">
+      <td>Diluted Shares (M)</td>
+      ${actTds(act, a => fmtSharesM(a.diluted_shares))}
+      ${projs.map((p, i) => projValTd('shares', i, fmtSharesM(p.shares))).join('')}
+    </tr>
+    <tr class="row-italic">
+      <td>y/y % Change</td>
+      ${actTds(act, a => dash(a.shares_growth, fmtPct))}
+      ${projs.map((p, i) => editableTd('sharesGrowth', i, p.sharesGrowth)).join('')}
+    </tr>
+
+    <tr class="row-bold row-highlight">
+      <td>GAAP EPS (Diluted)</td>
+      ${actTds(act, a => fmtEPS(a.eps))}
+      ${projs.map((p, i) => projValTd('eps', i, fmtEPS(p.eps))).join('')}
     </tr>
   `;
 }
 
+function _fcfRows(s, projs) {
+  const act = s.actuals;
+  return `
+    <tr class="row-body row-cost">
+      <td>Capital Expenditures</td>
+      ${actTds(act, a => fmtMParen(a.capex))}
+      ${projs.map((p, i) => projValTd('capex', i, fmtMParen(p.capex))).join('')}
+    </tr>
+    <tr class="row-italic">
+      <td>% of Revenue</td>
+      ${actTds(act, a => a.revenue > 0 ? fmtPct(a.capex / a.revenue) : '—')}
+      ${projs.map((p, i) => editableTd('capexPct', i, p.capexPct)).join('')}
+    </tr>
 
-/* ── Projection table render (full rebuild) ── */
+    <tr class="row-body">
+      <td>Depreciation &amp; Amortization</td>
+      ${actTds(act, a => fmtM(a.da))}
+      ${projs.map((p, i) => projValTd('da', i, fmtM(p.da))).join('')}
+    </tr>
+    <tr class="row-italic">
+      <td>% of Revenue</td>
+      ${actTds(act, a => a.revenue > 0 ? fmtPct(a.da / a.revenue) : '—')}
+      ${projs.map((p, i) => editableTd('daPct', i, p.daPct)).join('')}
+    </tr>
+
+    <tr class="row-bold row-fcf">
+      <td>Free Cash Flow</td>
+      ${actTds(act, a => fmtM(a.fcf))}
+      ${projs.map((p, i) => projValTd('fcf', i, fmtM(p.fcf))).join('')}
+    </tr>
+  `;
+}
+
+function _balanceSheetRows(s) {
+  const act    = s.actuals;
+  const nProj  = 5;
+  const blanks = Array(nProj).fill('<td>—</td>').join('');
+  return `
+    <tr class="row-body">
+      <td>Cash</td>
+      ${actTds(act, a => fmtM(a.cash))}
+      ${blanks}
+    </tr>
+    <tr class="row-body row-cost">
+      <td>Long-Term Debt</td>
+      ${actTds(act, a => fmtMParen(a.long_term_debt))}
+      ${blanks}
+    </tr>
+    <tr class="row-body row-cost">
+      <td>Short-Term Debt</td>
+      ${actTds(act, a => fmtMParen(a.short_term_debt))}
+      ${blanks}
+    </tr>
+    <tr class="row-bold">
+      <td>Net Debt</td>
+      ${actTds(act, a => fmtM(a.net_debt))}
+      ${blanks}
+    </tr>
+  `;
+}
+
+function _terminalValueRows(s, result) {
+  const act      = s.actuals;
+  const actBlanks = act.map(() => '<td class="col-actual">—</td>').join('');
+  const proj14   = Array(4).fill('<td>—</td>').join('');   // years 0-3
+  const peClass  = 'cell-editable' + (s.overridden.exitPe ? ' cell-overridden' : '');
+  return `
+    <tr class="row-italic">
+      <td>P/E Exit Multiple</td>
+      ${actBlanks}
+      ${proj14}
+      <td class="${peClass}" data-field="exitPe" data-year="4">${fmtMultiple(s.exitPeMultiple)}</td>
+    </tr>
+    <tr class="row-body">
+      <td>Terminal Equity Value</td>
+      ${actBlanks}
+      ${proj14}
+      <td data-val="terminalValue" data-year="4">${fmtUSD(result.tv)}</td>
+    </tr>
+  `;
+}
+
+function _buildAllRows(s, result) {
+  const numCols = 1 + s.actuals.length + 5;
+  return (
+    _sectionHeader('Income Statement', numCols) +
+    _incomeRows(s, result.rows) +
+    _sectionHeader('Free Cash Flow', numCols) +
+    _fcfRows(s, result.rows) +
+    _sectionHeader('Balance Sheet', numCols) +
+    _balanceSheetRows(s) +
+    _sectionHeader('Terminal Value', numCols) +
+    _terminalValueRows(s, result)
+  );
+}
+
+
+/* ── Full projection table render ── */
 
 function renderProjectionTable() {
-  const s     = _dcfState;
-  const projs = computeProjections(s);
-  const years = projs.map((_, i) => s.baseYear + 1 + i);
+  const s       = _dcfState;
+  const result  = computeProjections(s);
+  const baseYr  = s.actuals[s.actuals.length - 1].year;
+  const projYrs = Array.from({ length: 5 }, (_, i) => baseYr + 1 + i);
 
   document.getElementById('dcf-projection').innerHTML = `
     <div class="dcf-proj-wrapper">
       <div class="dcf-proj-header">
         <div>
-          <div class="dcf-proj-title">${escapeHtml(s.ticker)} DCF Valuation: Revenue &amp; Expenses Forecast</div>
-          <div class="dcf-proj-subtitle">(USD in millions)</div>
+          <div class="dcf-proj-title">${escapeHtml(s.ticker)} DCF Valuation Model</div>
+          <div class="dcf-proj-subtitle">(USD in millions, except per share data)</div>
         </div>
         <div class="proj-buttons">
           <button id="reset-btn"  class="btn-reset">Reset to Defaults</button>
-          <button id="recalc-btn" class="btn-recalc">Recalculate Intrinsic Value</button>
+          <button id="recalc-btn" class="btn-recalc">Recalculate</button>
         </div>
       </div>
       <div class="table-card">
@@ -383,12 +541,12 @@ function renderProjectionTable() {
             <thead>
               <tr>
                 <th class="col-label"></th>
-                <th class="col-actual">FY${s.baseYear}</th>
-                ${years.map(y => `<th>FY${y}E</th>`).join('')}
+                ${s.actuals.map(a => `<th class="col-actual">FY${a.year}</th>`).join('')}
+                ${projYrs.map(y => `<th>FY${y}E</th>`).join('')}
               </tr>
             </thead>
             <tbody>
-              ${buildTableRows(s, projs)}
+              ${_buildAllRows(s, result)}
             </tbody>
           </table>
         </div>
@@ -396,10 +554,14 @@ function renderProjectionTable() {
     </div>
   `;
 
+  /* Sync the valuation bridge on every full re-render (commit / reset). */
+  renderValuationBridge(result.pvFcfs, result.pvTv, result.equityValue,
+                        s.baseDilutedShares, result.iv);
+
   document.getElementById('recalc-btn').addEventListener('click', handleRecalculate);
   document.getElementById('reset-btn').addEventListener('click', handleReset);
 
-  /* event delegation on tbody — re-attached after every full re-render */
+  /* Event delegation on tbody — re-attached after every full re-render */
   document.querySelector('#dcf-projection tbody')
     .addEventListener('click', handleCellClick);
 }
@@ -409,15 +571,16 @@ function renderProjectionTable() {
 
 function handleCellClick(e) {
   const td = e.target.closest('td.cell-editable');
-  if (!td || td.querySelector('input')) return;   // already editing
+  if (!td || td.querySelector('input')) return;
 
-  const field = td.dataset.field;
-  const year  = parseInt(td.dataset.year, 10);
-  const originalPct = getCellPct(field, year);
+  const field         = td.dataset.field;
+  const year          = parseInt(td.dataset.year, 10);
+  const originalValue = getCellValue(field, year);
+  const wasOverridden = isCellOverridden(field, year);
 
-  /* open the input */
+  /* Open the input */
   td.classList.add('cell-editing');
-  td.innerHTML = `<input type="text" value="${(originalPct * 100).toFixed(1)}" autocomplete="off" />`;
+  td.innerHTML = `<input type="text" value="${_inputDisplayValue(field, originalValue)}" autocomplete="off" />`;
 
   const input = td.querySelector('input');
   input.focus();
@@ -426,28 +589,31 @@ function handleCellClick(e) {
   let committed = false;
 
   /* ── Live update while typing ──
-   * Applies the edit to state and surgically updates every downstream
-   * cell in the DOM without replacing the active <input>. */
+   * Applies the edit to state and surgically updates all downstream cells
+   * in the DOM without replacing the active <input>. */
   input.addEventListener('input', () => {
-    const raw = parseFloat(input.value.replace('%', '').trim());
-    if (isNaN(raw)) return;
-    applyCellEdit(field, year, raw / 100);
+    const value = _parseInput(field, input.value);
+    if (value === null) return;
+    applyCellEdit(field, year, value);
     updateTableCells(computeProjections(_dcfState));
   });
 
   /* ── Commit on Enter or blur ──
-   * Locks in the value and does a full re-render so the <input> is
-   * replaced by a styled cell again. */
+   * Locks in the value and does a full re-render. */
   const commit = () => {
     if (committed) return;
     committed = true;
-    const raw = parseFloat(input.value.replace('%', '').trim());
-    if (!isNaN(raw)) {
-      applyCellEdit(field, year, raw / 100);
+    const value = _parseInput(field, input.value);
+    if (value !== null) {
+      applyCellEdit(field, year, value);
     } else {
-      /* invalid input: revert to value before the edit began */
-      applyCellEdit(field, year, originalPct);
-      _dcfState.overridden[_overriddenKey(field)][year] = false;
+      /* Invalid input — revert */
+      applyCellEdit(field, year, originalValue);
+      if (field === 'exitPe') {
+        _dcfState.overridden.exitPe = wasOverridden;
+      } else {
+        _dcfState.overridden[_overriddenKey(field)][year] = wasOverridden;
+      }
     }
     renderProjectionTable();
   };
@@ -455,29 +621,20 @@ function handleCellClick(e) {
   const cancel = () => {
     if (committed) return;
     committed = true;
-    /* restore original value in state */
-    applyCellEdit(field, year, originalPct);
-    _dcfState.overridden[_overriddenKey(field)][year] = false;
+    applyCellEdit(field, year, originalValue);
+    if (field === 'exitPe') {
+      _dcfState.overridden.exitPe = wasOverridden;
+    } else {
+      _dcfState.overridden[_overriddenKey(field)][year] = wasOverridden;
+    }
     renderProjectionTable();
   };
 
-  input.addEventListener('blur', commit);
+  input.addEventListener('blur',    commit);
   input.addEventListener('keydown', ev => {
     if (ev.key === 'Enter')  { ev.preventDefault(); commit(); }
     if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
   });
-}
-
-/* Maps a field name to the overridden sub-object key */
-function _overriddenKey(field) {
-  switch (field) {
-    case 'growthRate':               return 'growthRates';
-    case 'corPct': case 'gpMargin': return 'gpMargins';
-    case 'opexPct': case 'ebitMargin': return 'opexPcts';
-    case 'taxRate':                  return 'taxRates';
-    case 'fcfMargin':                return 'fcfMargins';
-    default:                         return 'growthRates';
-  }
 }
 
 
@@ -485,31 +642,38 @@ function _overriddenKey(field) {
 
 function handleReset() {
   const s = _dcfState;
-  const defaults = s.defaults;
-
-  s.growthRates = [...defaults.growthRates];
-  s.gpMargins   = [...defaults.gpMargins];
-  s.opexPcts    = [...defaults.opexPcts];
-  s.taxRates    = [...defaults.taxRates];
-  s.fcfMargins  = [...defaults.fcfMargins];
-
+  const d = s.defaults;
+  /* Restore per-year assumptions from snapshot (array copies, not references) */
+  s.growthRates    = [...d.growthRates];
+  s.opMargins      = [...d.opMargins];
+  s.taxRates       = [...d.taxRates];
+  s.capexPcts      = [...d.capexPcts];
+  s.daPcts         = [...d.daPcts];
+  s.sharesGrowths  = [...d.sharesGrowths];
+  s.exitPeMultiple = d.exitPeMultiple;
   s.overridden = {
-    growthRates: Array(5).fill(false),
-    gpMargins:   Array(5).fill(false),
-    opexPcts:    Array(5).fill(false),
-    taxRates:    Array(5).fill(false),
-    fcfMargins:  Array(5).fill(false),
+    growthRates:   Array(5).fill(false),
+    opMargins:     Array(5).fill(false),
+    taxRates:      Array(5).fill(false),
+    capexPcts:     Array(5).fill(false),
+    daPcts:        Array(5).fill(false),
+    sharesGrowths: Array(5).fill(false),
+    exitPe:        false,
   };
-
   renderProjectionTable();
-
-  /* also restore price widget and bridge to original model values */
+  /* Restore price widget to exact server-computed values */
   renderPriceWidget(_fullData);
-  renderValuationBridge(_fullData.dcf_model, _fullData.intrinsic_value);
+  renderValuationBridge(
+    _fullData.dcf_model.pv_fcfs,
+    _fullData.dcf_model.pv_terminal_value,
+    _fullData.dcf_model.equity_value,
+    _fullData.dcf_model.base_diluted_shares,
+    _fullData.intrinsic_value,
+  );
 }
 
 
-/* ── Recalculate button ── */
+/* ── Recalculate button (server-side validation) ── */
 
 async function handleRecalculate() {
   const s   = _dcfState;
@@ -519,45 +683,42 @@ async function handleRecalculate() {
 
   try {
     const result = await fetchRecalculate(s.ticker, {
-      base_revenue:         s.baseRevenue,
-      growth_rates:         s.growthRates,
-      fcf_margins:          s.fcfMargins,
-      wacc:                 s.wacc,
-      terminal_growth_rate: s.terminalGrowthRate,
-      net_cash:             s.netCash,
-      shares_outstanding:   s.sharesOutstanding,
-      current_price:        s.currentPrice,
+      base_revenue:        s.baseRevenue,
+      base_diluted_shares: s.baseDilutedShares,
+      interest_expense:    s.interestExpense,
+      growth_rates:        s.growthRates,
+      op_margins:          s.opMargins,
+      tax_rates:           s.taxRates,
+      capex_pcts:          s.capexPcts,
+      da_pcts:             s.daPcts,
+      shares_growths:      s.sharesGrowths,
+      exit_pe_multiple:    s.exitPeMultiple,
+      cost_of_equity:      s.costOfEquity,
+      current_price:       s.currentPrice,
     });
 
-    updatePriceWidgetFromRecalc(result, s.currentPrice);
-
-    const updatedModel = Object.assign({}, _fullData.dcf_model, {
-      pv_fcfs:           result.pv_fcfs,
-      pv_terminal_value: result.pv_terminal_value,
-      enterprise_value:  result.enterprise_value,
-      equity_value:      result.equity_value,
-    });
-    renderValuationBridge(updatedModel, result.intrinsic_value);
+    _updatePriceWidget(result.intrinsic_value, result.upside_downside, s.currentPrice);
+    renderValuationBridge(result.pv_fcfs, result.pv_terminal_value,
+                          result.equity_value, s.baseDilutedShares, result.intrinsic_value);
 
   } catch (err) {
     alert('Recalculate failed: ' + err.message);
   } finally {
     btn.disabled    = false;
-    btn.textContent = 'Recalculate Intrinsic Value';
+    btn.textContent = 'Recalculate';
   }
 }
 
 
-/* ── Price widget update after recalculate ── */
+/* ── Price widget helpers ── */
 
-function updatePriceWidgetFromRecalc(result, currentPrice) {
+function _updatePriceWidget(iv, upside, currentPrice) {
   const widget = document.getElementById('price-widget');
-  const pct    = result.upside_downside;
-  const isUp   = pct >= 0;
-  const cls    = isUp ? 'up' : 'down';
-  const arrow  = isUp ? '\u25b2' : '\u25bc';
-  const label  = isUp ? 'Upside' : 'Downside';
-
+  if (!widget) return;
+  const isUp  = upside >= 0;
+  const cls   = isUp ? 'up' : 'down';
+  const arrow = isUp ? '\u25b2' : '\u25bc';
+  const label = isUp ? 'Upside' : 'Downside';
   widget.innerHTML = `
     <div class="price-col">
       <div class="price-label">Current Price</div>
@@ -565,19 +726,19 @@ function updatePriceWidgetFromRecalc(result, currentPrice) {
     </div>
     <div class="price-divider"></div>
     <div class="upside-badge ${cls}">
-      <div class="upside-pct">${arrow} ${Math.abs(pct).toFixed(1)}%</div>
+      <div class="upside-pct">${arrow} ${Math.abs(upside).toFixed(1)}%</div>
       <div class="upside-sub">${label} to IV</div>
     </div>
     <div class="price-divider"></div>
     <div class="price-col">
       <div class="price-label">Intrinsic Value (DCF)</div>
-      <div class="price-value">$${result.intrinsic_value.toFixed(2)}</div>
+      <div class="price-value">$${iv.toFixed(2)}</div>
     </div>
   `;
 }
 
 
-/* ── Cost of Capital cards ── */
+/* ── CAPM cards ── */
 
 function renderCostOfCapital(d) {
   document.getElementById('dcf-wacc').innerHTML = `
@@ -594,16 +755,8 @@ function renderCostOfCapital(d) {
       <div class="assumption-value">${d.beta.toFixed(2)}</div>
     </div>
     <div class="assumption-card">
-      <div class="assumption-label">Cost of Equity</div>
+      <div class="assumption-label">Cost of Equity (Re)</div>
       <div class="assumption-value">${fmtPct(d.cost_of_equity)}</div>
-    </div>
-    <div class="assumption-card">
-      <div class="assumption-label">Cost of Debt</div>
-      <div class="assumption-value">${fmtPct(d.cost_of_debt)}</div>
-    </div>
-    <div class="assumption-card">
-      <div class="assumption-label">WACC</div>
-      <div class="assumption-value">${fmtPct(d.wacc)}</div>
     </div>
   `;
 }
@@ -611,38 +764,27 @@ function renderCostOfCapital(d) {
 
 /* ── Valuation Bridge ── */
 
-function renderValuationBridge(d, intrinsicValue) {
-  const netCashLabel = d.net_cash >= 0 ? '+ Net Cash' : '\u2212 Net Debt';
-  const netCashSign  = d.net_cash >= 0 ? '+' : '\u2212';
-
+function renderValuationBridge(pvFcfs, pvTv, equityValue, dilutedShares, iv) {
   document.getElementById('dcf-bridge').innerHTML = `
     <div class="bridge-row">
       <span><span class="bridge-sign">+</span> PV of FCFs (Years 1&ndash;5)</span>
-      <span>${fmtUSD(d.pv_fcfs)}</span>
+      <span>${fmtUSD(pvFcfs)}</span>
     </div>
     <div class="bridge-row">
-      <span><span class="bridge-sign">+</span> PV of Terminal Value</span>
-      <span>${fmtUSD(d.pv_terminal_value)}</span>
-    </div>
-    <div class="bridge-row subtotal">
-      <span>Enterprise Value</span>
-      <span>${fmtUSD(d.enterprise_value)}</span>
-    </div>
-    <div class="bridge-row">
-      <span><span class="bridge-sign">${netCashSign}</span> ${netCashLabel} (Cash &minus; Debt)</span>
-      <span>${fmtUSD(Math.abs(d.net_cash))}</span>
+      <span><span class="bridge-sign">+</span> PV of Terminal Value (P/E Exit)</span>
+      <span>${fmtUSD(pvTv)}</span>
     </div>
     <div class="bridge-row subtotal">
       <span>Equity Value</span>
-      <span>${fmtUSD(d.equity_value)}</span>
+      <span>${fmtUSD(equityValue)}</span>
     </div>
     <div class="bridge-row">
-      <span><span class="bridge-sign">&divide;</span> Shares Outstanding</span>
-      <span>${fmtShares(d.shares_outstanding)} shares</span>
+      <span><span class="bridge-sign">&divide;</span> Diluted Shares Outstanding</span>
+      <span>${fmtSharesM(dilutedShares)}M shares</span>
     </div>
     <div class="bridge-row total">
       <span>Intrinsic Value / Share</span>
-      <span>$${intrinsicValue.toFixed(2)}</span>
+      <span>$${iv.toFixed(2)}</span>
     </div>
   `;
 }
@@ -674,5 +816,5 @@ function renderDCF(data) {
   initState(data);
   renderProjectionTable();
   renderCostOfCapital(data.dcf_model);
-  renderValuationBridge(data.dcf_model, data.intrinsic_value);
+  /* Bridge rendered inside renderProjectionTable; no separate call needed. */
 }
