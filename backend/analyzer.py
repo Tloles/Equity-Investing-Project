@@ -6,7 +6,6 @@ Requires ANTHROPIC_API_KEY in the environment (loaded from .env).
 """
 
 import os
-import json
 from dataclasses import dataclass
 
 import anthropic
@@ -178,4 +177,223 @@ def analyze(
         bear_case=data["bear_case"],
         downplayed_risks=data["downplayed_risks"],
         analyst_summary=data["analyst_summary"],
+    )
+
+
+# ── Industry analysis ──────────────────────────────────────────────────────────
+
+
+def _porter_force_schema(name: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "rating": {
+                "type": "string",
+                "enum": ["Low", "Medium", "High"],
+                "description": f"Competitive intensity rating for {name}.",
+            },
+            "explanation": {
+                "type": "string",
+                "description": (
+                    f"2-3 sentences explaining the {name} rating, "
+                    "grounded in specific evidence from the source documents."
+                ),
+            },
+        },
+        "required": ["rating", "explanation"],
+    }
+
+
+_INDUSTRY_TOOL = {
+    "name": "provide_industry_analysis",
+    "description": (
+        "Provide a structured industry analysis including Porter's Five Forces, "
+        "competitive position, key KPIs, and macro tailwinds/headwinds."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "threat_of_new_entrants":        _porter_force_schema("Threat of New Entrants"),
+            "bargaining_power_of_suppliers": _porter_force_schema("Bargaining Power of Suppliers"),
+            "bargaining_power_of_buyers":    _porter_force_schema("Bargaining Power of Buyers"),
+            "threat_of_substitutes":         _porter_force_schema("Threat of Substitutes"),
+            "competitive_rivalry":           _porter_force_schema("Competitive Rivalry"),
+            "industry_structure": {
+                "type": "string",
+                "description": (
+                    "2-3 paragraph overview of the overall industry dynamics, "
+                    "competitive structure, and key forces at play."
+                ),
+            },
+            "competitive_position": {
+                "type": "string",
+                "description": (
+                    "Where this company sits relative to competitors: its moats, "
+                    "differentiation, and relative strengths/weaknesses."
+                ),
+            },
+            "key_kpis": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {
+                            "type": "string",
+                            "description": "KPI name, e.g. 'Net Revenue Retention'.",
+                        },
+                        "why_it_matters": {
+                            "type": "string",
+                            "description": (
+                                "1-2 sentences explaining why this metric is critical "
+                                "for this specific industry."
+                            ),
+                        },
+                    },
+                    "required": ["metric", "why_it_matters"],
+                },
+                "description": "The 3-5 most important KPIs to track for this industry/sector.",
+            },
+            "tailwinds": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Exactly 3 macro or structural trends benefiting the industry.",
+            },
+            "headwinds": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Exactly 3 macro or structural trends threatening the industry.",
+            },
+        },
+        "required": [
+            "threat_of_new_entrants", "bargaining_power_of_suppliers",
+            "bargaining_power_of_buyers", "threat_of_substitutes",
+            "competitive_rivalry", "industry_structure", "competitive_position",
+            "key_kpis", "tailwinds", "headwinds",
+        ],
+    },
+}
+
+
+@dataclass
+class PorterForce:
+    rating: str       # "Low", "Medium", or "High"
+    explanation: str
+
+
+@dataclass
+class IndustryKPI:
+    metric: str
+    why_it_matters: str
+
+
+@dataclass
+class IndustryAnalysisResult:
+    ticker: str
+    threat_of_new_entrants: PorterForce
+    bargaining_power_of_suppliers: PorterForce
+    bargaining_power_of_buyers: PorterForce
+    threat_of_substitutes: PorterForce
+    competitive_rivalry: PorterForce
+    industry_structure: str
+    competitive_position: str
+    key_kpis: list
+    tailwinds: list
+    headwinds: list
+
+
+def _build_industry_prompt(
+    ticker: str,
+    tenk_text: str,
+    transcript_text: str,
+    sector: str = "",
+) -> str:
+    tenk_snippet       = tenk_text[:12_000]       if tenk_text       else "(not available)"
+    transcript_snippet = transcript_text[:8_000]   if transcript_text else "(not available)"
+
+    sector_line = f"Sector: {sector}\n\n" if sector else ""
+
+    return f"""You are an experienced industry analyst. Analyze the following source
+materials for {ticker} and produce a rigorous industry analysis.
+
+{sector_line}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
+{tenk_snippet}
+
+--- LATEST EARNINGS CALL TRANSCRIPT ---
+{transcript_snippet}
+
+Based solely on these materials, use the `provide_industry_analysis` tool to return:
+1. Porter's Five Forces — rate each force (Low/Medium/High) with a 2-3 sentence
+   evidence-backed explanation drawn from the documents.
+2. Industry Structure — 2-3 paragraphs on overall industry dynamics.
+3. Competitive Position — where {ticker} sits vs peers; its moats and differentiators.
+4. Key Industry KPIs — 3-5 metrics most critical to monitor for this sector.
+5. Industry Tailwinds — exactly 3 macro or structural trends benefiting the industry.
+6. Industry Headwinds — exactly 3 macro or structural trends threatening the industry.
+
+Ground every point in specific details from the documents above."""
+
+
+def analyze_industry(
+    ticker: str,
+    tenk_text: str,
+    transcript_text: str,
+    sector: str = "",
+) -> "IndustryAnalysisResult":
+    """
+    Send 10-K and transcript text to Claude and return a structured
+    IndustryAnalysisResult covering Porter's Five Forces, industry structure,
+    competitive position, key KPIs, tailwinds, and headwinds.
+
+    Raises
+    ------
+    EnvironmentError  if ANTHROPIC_API_KEY is not set.
+    ValueError        if Claude does not return the expected tool call.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise EnvironmentError(
+            "ANTHROPIC_API_KEY is not set. Add it to your .env file."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = _build_industry_prompt(ticker, tenk_text, transcript_text, sector)
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=2048,
+        tools=[_INDUSTRY_TOOL],
+        tool_choice={"type": "tool", "name": "provide_industry_analysis"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    tool_use_block = next(
+        (block for block in response.content if block.type == "tool_use"),
+        None,
+    )
+    if tool_use_block is None:
+        raise ValueError("Claude did not return an industry analysis tool call.")
+
+    d = tool_use_block.input
+
+    def _pf(key: str) -> PorterForce:
+        return PorterForce(
+            rating=d[key]["rating"],
+            explanation=d[key]["explanation"],
+        )
+
+    return IndustryAnalysisResult(
+        ticker=ticker.upper(),
+        threat_of_new_entrants=_pf("threat_of_new_entrants"),
+        bargaining_power_of_suppliers=_pf("bargaining_power_of_suppliers"),
+        bargaining_power_of_buyers=_pf("bargaining_power_of_buyers"),
+        threat_of_substitutes=_pf("threat_of_substitutes"),
+        competitive_rivalry=_pf("competitive_rivalry"),
+        industry_structure=d["industry_structure"],
+        competitive_position=d["competitive_position"],
+        key_kpis=[
+            IndustryKPI(metric=k["metric"], why_it_matters=k["why_it_matters"])
+            for k in d["key_kpis"]
+        ],
+        tailwinds=d["tailwinds"],
+        headwinds=d["headwinds"],
     )

@@ -57,6 +57,7 @@
     <!-- Tab bar -->
     <div class="tab-bar">
       <button class="tab-btn active" data-tab="analysis">Analysis</button>
+      <button class="tab-btn" data-tab="industry">Industry</button>
       <button class="tab-btn" data-tab="dcf">DCF Model</button>
     </div>
 
@@ -95,6 +96,63 @@
       </div>
     </div><!-- /tab-analysis -->
 
+    <!-- ── Industry tab ── -->
+    <div id="tab-industry" hidden>
+
+      <div id="industry-unavailable" class="industry-unavailable" hidden>
+        <p>Industry analysis unavailable for this ticker.</p>
+      </div>
+
+      <div id="industry-content">
+        <!-- Porter's Five Forces -->
+        <p class="dcf-section-label">Porter&#8217;s Five Forces</p>
+        <div class="porter-grid" id="porter-grid"></div>
+
+        <!-- Industry Structure -->
+        <div class="card industry-prose" style="margin-bottom:16px">
+          <div class="card-header">
+            <span class="card-title industry-title">Industry Structure</span>
+          </div>
+          <div id="industry-structure"></div>
+        </div>
+
+        <!-- Competitive Position -->
+        <div class="card industry-prose" style="margin-bottom:16px">
+          <div class="card-header">
+            <span class="card-title industry-title">Competitive Position</span>
+          </div>
+          <p id="competitive-position"></p>
+        </div>
+
+        <!-- Key Industry KPIs -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header">
+            <span class="card-title industry-title">Key Industry KPIs</span>
+          </div>
+          <ul class="kpi-list" id="kpi-list"></ul>
+        </div>
+
+        <!-- Tailwinds & Headwinds -->
+        <div class="two-col">
+          <div class="card bull">
+            <div class="card-header">
+              <div class="card-icon">&#9650;</div>
+              <span class="card-title">Industry Tailwinds</span>
+            </div>
+            <ol id="tailwinds-list"></ol>
+          </div>
+          <div class="card bear">
+            <div class="card-header">
+              <div class="card-icon">&#9660;</div>
+              <span class="card-title">Industry Headwinds</span>
+            </div>
+            <ol id="headwinds-list"></ol>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /tab-industry -->
+
     <!-- ── DCF Model tab ── -->
     <div id="tab-dcf" hidden>
 
@@ -125,6 +183,7 @@
 
 <script src="js/api.js"></script>
 <script src="js/analysis.js"></script>
+<script src="js/industry.js"></script>
 <script src="js/dcf.js"></script>
 <script src="js/app.js"></script>
 </body>

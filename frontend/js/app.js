@@ -21,11 +21,12 @@ function setLoading(on) {
 }
 
 /* ── Tab switching ── */
+const TAB_IDS = ['analysis', 'industry', 'dcf'];
+
 document.querySelectorAll('.tab-btn').forEach(tabBtn => {
   tabBtn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('tab-analysis').hidden = true;
-    document.getElementById('tab-dcf').hidden = true;
+    TAB_IDS.forEach(id => { document.getElementById('tab-' + id).hidden = true; });
     tabBtn.classList.add('active');
     document.getElementById('tab-' + tabBtn.dataset.tab).hidden = false;
   });
@@ -35,7 +36,9 @@ function resetTabs() {
   document.querySelectorAll('.tab-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === 'analysis'));
   document.getElementById('tab-analysis').hidden = false;
-  document.getElementById('tab-dcf').hidden = true;
+  TAB_IDS.filter(id => id !== 'analysis').forEach(id => {
+    document.getElementById('tab-' + id).hidden = true;
+  });
 }
 
 /* ── Form submit ── */
@@ -61,6 +64,7 @@ form.addEventListener('submit', async e => {
     renderList(document.getElementById('bear-list'),  data.bear_case);
     renderList(document.getElementById('risks-list'), data.downplayed_risks);
     document.getElementById('summary-text').innerHTML = parseMarkdown(data.analyst_summary);
+    renderIndustry(data);
     renderDCF(data);
     resetTabs();
 

@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.analyzer import analyze
+from backend.analyzer import analyze, analyze_industry
 from backend.config import PROJECTION_YEARS
 from backend.dcf import fetch_dcf
 from backend.industry_classifier import fetch_sector_info
@@ -160,6 +160,32 @@ class AnalysisResponse(BaseModel):
     bear_case: list
     downplayed_risks: list
     analyst_summary: str
+
+    # Industry analysis (best-effort — None if Claude call fails)
+    industry_analysis: Optional[IndustryAnalysis] = None
+
+
+class PorterForceItem(BaseModel):
+    rating: str
+    explanation: str
+
+
+class IndustryKPI(BaseModel):
+    metric: str
+    why_it_matters: str
+
+
+class IndustryAnalysis(BaseModel):
+    threat_of_new_entrants: PorterForceItem
+    bargaining_power_of_suppliers: PorterForceItem
+    bargaining_power_of_buyers: PorterForceItem
+    threat_of_substitutes: PorterForceItem
+    competitive_rivalry: PorterForceItem
+    industry_structure: str
+    competitive_position: str
+    key_kpis: List[IndustryKPI]
+    tailwinds: List[str]
+    headwinds: List[str]
 
 
 class RecalculateRequest(BaseModel):
@@ -370,23 +396,40 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         dcf_data = dcf_result  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
-    # Phase 2: build combined text inputs and run Claude analysis
+    # Phase 2: build combined text inputs and run both Claude analyses
+    # concurrently (bull/bear + industry)
     # ------------------------------------------------------------------
     tenk_text = "\n\n".join(
         filter(None, [tenk_data.get("mda"), tenk_data.get("risk_factors")])
     )
     transcript_text = transcript_data["content"] if transcript_data else ""
 
-    try:
-        result = await asyncio.to_thread(
+    _sector = sector_info.sector if sector_info else ""
+
+    claude_results = await asyncio.gather(
+        asyncio.to_thread(
             analyze, ticker, tenk_text, transcript_text,
-            sector_info.sector if sector_info else "",
-            sector_rules.analyst_guidance,
-        )
-    except EnvironmentError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+            _sector, sector_rules.analyst_guidance,
+        ),
+        asyncio.to_thread(
+            analyze_industry, ticker, tenk_text, transcript_text, _sector,
+        ),
+        return_exceptions=True,
+    )
+    analysis_result, industry_result = claude_results
+
+    if isinstance(analysis_result, EnvironmentError):
+        raise HTTPException(status_code=500, detail=str(analysis_result))
+    if isinstance(analysis_result, Exception):
+        raise HTTPException(status_code=500, detail=str(analysis_result))
+
+    result = analysis_result  # type: ignore[assignment]
+
+    if isinstance(industry_result, Exception):
+        print(f"[main] Industry analysis failed — {type(industry_result).__name__}: {industry_result}")
+        industry_data = None
+    else:
+        industry_data = industry_result  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Phase 3: assemble and return response
@@ -438,6 +481,36 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         bear_case=result.bear_case,
         downplayed_risks=result.downplayed_risks,
         analyst_summary=result.analyst_summary,
+        industry_analysis=IndustryAnalysis(
+            threat_of_new_entrants=PorterForceItem(
+                rating=industry_data.threat_of_new_entrants.rating,
+                explanation=industry_data.threat_of_new_entrants.explanation,
+            ),
+            bargaining_power_of_suppliers=PorterForceItem(
+                rating=industry_data.bargaining_power_of_suppliers.rating,
+                explanation=industry_data.bargaining_power_of_suppliers.explanation,
+            ),
+            bargaining_power_of_buyers=PorterForceItem(
+                rating=industry_data.bargaining_power_of_buyers.rating,
+                explanation=industry_data.bargaining_power_of_buyers.explanation,
+            ),
+            threat_of_substitutes=PorterForceItem(
+                rating=industry_data.threat_of_substitutes.rating,
+                explanation=industry_data.threat_of_substitutes.explanation,
+            ),
+            competitive_rivalry=PorterForceItem(
+                rating=industry_data.competitive_rivalry.rating,
+                explanation=industry_data.competitive_rivalry.explanation,
+            ),
+            industry_structure=industry_data.industry_structure,
+            competitive_position=industry_data.competitive_position,
+            key_kpis=[
+                IndustryKPI(metric=k.metric, why_it_matters=k.why_it_matters)
+                for k in industry_data.key_kpis
+            ],
+            tailwinds=industry_data.tailwinds,
+            headwinds=industry_data.headwinds,
+        ) if industry_data else None,
     )
 
 
