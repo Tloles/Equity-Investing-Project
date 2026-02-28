@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.analyzer import analyze
+from backend.config import PROJECTION_YEARS
 from backend.dcf import fetch_dcf
 from backend.industry_classifier import fetch_sector_info
 from backend.industry_config import get_sector_rules
@@ -77,14 +78,29 @@ class DCFModel(BaseModel):
     fcf_margin: float
     wacc: float
     terminal_growth_rate: float
+
+    # Per-year projections
     projected_fcf: List[float]
     pv_projected_fcf: List[float]
+    projected_revenue: List[float]
+
+    # Value components
     pv_fcfs: float
     pv_terminal_value: float
     enterprise_value: float
     net_cash: float
     equity_value: float
     shares_outstanding: float
+
+    # Base year (most recent actual) P&L
+    base_revenue: float
+    base_cost_of_revenue: float
+    base_gross_profit: float
+    base_operating_expenses: float
+    base_ebit: float
+    base_tax_expense: float
+    base_fcf_actual: float
+    base_year: int
 
 
 class AnalysisResponse(BaseModel):
@@ -117,6 +133,29 @@ class AnalysisResponse(BaseModel):
     bear_case: list
     downplayed_risks: list
     analyst_summary: str
+
+
+class RecalculateRequest(BaseModel):
+    base_revenue: float          # most recent actual revenue (raw USD, not millions)
+    growth_rates: List[float]    # 5 per-year YoY growth rates
+    fcf_margins: List[float]     # 5 per-year FCF margins (decimal)
+    wacc: float
+    terminal_growth_rate: float
+    net_cash: float
+    shares_outstanding: float
+    current_price: float
+
+
+class RecalculateResponse(BaseModel):
+    intrinsic_value: float
+    upside_downside: float
+    projected_revenue: List[float]
+    projected_fcf: List[float]
+    pv_projected_fcf: List[float]
+    pv_fcfs: float
+    pv_terminal_value: float
+    enterprise_value: float
+    equity_value: float
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -152,6 +191,67 @@ async def health() -> dict:
 
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return {"status": overall, "sources": checks}
+
+
+@app.post(
+    "/dcf/recalculate/{ticker}",
+    response_model=RecalculateResponse,
+    tags=["analysis"],
+    summary="Recompute DCF with overridden per-year assumptions",
+)
+async def recalculate_dcf(ticker: str, req: RecalculateRequest) -> RecalculateResponse:
+    """
+    Recompute DCF intrinsic value using per-year growth rates and FCF margins
+    supplied by the client (e.g. after the user edits the projection table).
+
+    Revenue compounds year-over-year:
+      Year 1 = base_revenue × (1 + growth_rates[0])
+      Year 2 = Year 1      × (1 + growth_rates[1])  …etc.
+    """
+    n = PROJECTION_YEARS
+    if len(req.growth_rates) != n or len(req.fcf_margins) != n:
+        raise HTTPException(
+            status_code=422,
+            detail=f"growth_rates and fcf_margins must each have exactly {n} values.",
+        )
+
+    projected_revenue: List[float] = []
+    projected_fcf: List[float]     = []
+    pv_projected_fcf: List[float]  = []
+    prev_revenue = req.base_revenue
+
+    for i in range(n):
+        proj_rev = prev_revenue * (1.0 + req.growth_rates[i])
+        proj_fcf = proj_rev * req.fcf_margins[i]
+        pv       = proj_fcf / (1.0 + req.wacc) ** (i + 1)
+        projected_revenue.append(round(proj_rev, 0))
+        projected_fcf.append(round(proj_fcf, 0))
+        pv_projected_fcf.append(round(pv, 0))
+        prev_revenue = proj_rev
+
+    pv_fcfs           = sum(pv_projected_fcf)
+    terminal_fcf      = projected_fcf[-1] * (1.0 + req.terminal_growth_rate)
+    terminal_value    = terminal_fcf / (req.wacc - req.terminal_growth_rate)
+    pv_terminal_value = terminal_value / (1.0 + req.wacc) ** n
+    enterprise_value  = pv_fcfs + pv_terminal_value
+    equity_value      = enterprise_value + req.net_cash
+    intrinsic_value   = equity_value / req.shares_outstanding
+    upside_downside   = (
+        (intrinsic_value - req.current_price) / req.current_price * 100
+        if req.current_price > 0 else 0.0
+    )
+
+    return RecalculateResponse(
+        intrinsic_value   = round(intrinsic_value, 2),
+        upside_downside   = round(upside_downside, 1),
+        projected_revenue = projected_revenue,
+        projected_fcf     = projected_fcf,
+        pv_projected_fcf  = pv_projected_fcf,
+        pv_fcfs           = round(pv_fcfs, 0),
+        pv_terminal_value = round(pv_terminal_value, 0),
+        enterprise_value  = round(enterprise_value, 0),
+        equity_value      = round(equity_value, 0),
+    )
 
 
 @app.get(
@@ -266,23 +366,32 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         intrinsic_value=dcf_data.intrinsic_value if dcf_data else None,
         upside_downside=dcf_data.upside_downside if dcf_data else None,
         dcf_model=DCFModel(
-            risk_free_rate=dcf_data.risk_free_rate,
-            equity_risk_premium=dcf_data.equity_risk_premium,
-            beta=dcf_data.beta,
-            cost_of_equity=dcf_data.cost_of_equity,
-            cost_of_debt=dcf_data.cost_of_debt,
-            revenue_growth_rate=dcf_data.revenue_growth_rate,
-            fcf_margin=dcf_data.fcf_margin,
-            wacc=dcf_data.wacc,
-            terminal_growth_rate=dcf_data.terminal_growth_rate,
-            projected_fcf=dcf_data.projected_fcf,
-            pv_projected_fcf=dcf_data.pv_projected_fcf,
-            pv_fcfs=dcf_data.pv_fcfs,
-            pv_terminal_value=dcf_data.pv_terminal_value,
-            enterprise_value=dcf_data.enterprise_value,
-            net_cash=dcf_data.net_cash,
-            equity_value=dcf_data.equity_value,
-            shares_outstanding=dcf_data.shares_outstanding,
+            risk_free_rate          = dcf_data.risk_free_rate,
+            equity_risk_premium     = dcf_data.equity_risk_premium,
+            beta                    = dcf_data.beta,
+            cost_of_equity          = dcf_data.cost_of_equity,
+            cost_of_debt            = dcf_data.cost_of_debt,
+            revenue_growth_rate     = dcf_data.revenue_growth_rate,
+            fcf_margin              = dcf_data.fcf_margin,
+            wacc                    = dcf_data.wacc,
+            terminal_growth_rate    = dcf_data.terminal_growth_rate,
+            projected_fcf           = dcf_data.projected_fcf,
+            pv_projected_fcf        = dcf_data.pv_projected_fcf,
+            projected_revenue       = dcf_data.projected_revenue,
+            pv_fcfs                 = dcf_data.pv_fcfs,
+            pv_terminal_value       = dcf_data.pv_terminal_value,
+            enterprise_value        = dcf_data.enterprise_value,
+            net_cash                = dcf_data.net_cash,
+            equity_value            = dcf_data.equity_value,
+            shares_outstanding      = dcf_data.shares_outstanding,
+            base_revenue            = dcf_data.base_revenue,
+            base_cost_of_revenue    = dcf_data.base_cost_of_revenue,
+            base_gross_profit       = dcf_data.base_gross_profit,
+            base_operating_expenses = dcf_data.base_operating_expenses,
+            base_ebit               = dcf_data.base_ebit,
+            base_tax_expense        = dcf_data.base_tax_expense,
+            base_fcf_actual         = dcf_data.base_fcf_actual,
+            base_year               = dcf_data.base_year,
         ) if dcf_data else None,
         dcf_warning=sector_rules.dcf_warning,
         bull_case=result.bull_case,

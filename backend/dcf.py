@@ -62,6 +62,7 @@ class DCFResult:
     # Per-year projections (length == PROJECTION_YEARS)
     projected_fcf: List[float]
     pv_projected_fcf: List[float]
+    projected_revenue: List[float]
 
     # Value components (all in USD)
     pv_fcfs: float
@@ -70,6 +71,16 @@ class DCFResult:
     net_cash: float              # cash − total debt
     equity_value: float
     shares_outstanding: float
+
+    # Base year (most recent actual) P&L data
+    base_revenue: float
+    base_cost_of_revenue: float
+    base_gross_profit: float
+    base_operating_expenses: float   # gross_profit − operating_income
+    base_ebit: float                 # operating_income
+    base_tax_expense: float
+    base_fcf_actual: float
+    base_year: int
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,7 +121,7 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
     Returns
     -------
     DCFResult dataclass with price, intrinsic value, CAPM inputs, assumptions,
-    and per-year projections.
+    per-year projections, and base year P&L actuals.
 
     Raises
     ------
@@ -160,23 +171,41 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
     sector_rules: SectorRules = get_sector_rules(sector_label)
     print(f"[DCF] sector={sector_label!r}  rules={sector_rules.sector_label}")
 
-    # ── Step 3: extract revenue, FCF, and interest expense series ────────────
+    # ── Step 3: extract revenue, FCF, interest expense, and P&L actuals ──────
     try:
         print(f"[DCF] income_stmts[0] keys: {list(income_stmts[0].keys())}")
         print(f"[DCF] income_stmts[0] revenue={income_stmts[0].get('revenue')!r}  "
               f"interestExpense={income_stmts[0].get('interestExpense')!r}")
         print(f"[DCF] cash_flows[0] freeCashFlow={cash_flows[0].get('freeCashFlow')!r}")
+
         revenues = [float(s.get("revenue") or 0) for s in income_stmts]
         fcfs     = [float(s.get("freeCashFlow") or 0) for s in cash_flows]
         # FMP may report interestExpense as a negative number; take abs value
         interest_expenses = [
             abs(float(s.get("interestExpense") or 0)) for s in income_stmts
         ]
+
+        # Base year (most recent, index 0) P&L actuals
+        stmt0 = income_stmts[0]
+        base_cost_of_revenue    = abs(float(stmt0.get("costOfRevenue") or 0))
+        base_gross_profit       = float(stmt0.get("grossProfit") or 0)
+        base_ebit               = float(stmt0.get("operatingIncome") or 0)
+        # operating_expenses = GP − EBIT avoids relying on FMP's ambiguous field
+        base_operating_expenses = base_gross_profit - base_ebit
+        base_tax_expense        = abs(float(stmt0.get("incomeTaxExpense") or 0))
+        base_fcf_actual         = float(cash_flows[0].get("freeCashFlow") or 0)
+
+        # Fiscal year from calendarYear or the first 4 chars of the date field
+        _yr_raw = stmt0.get("calendarYear") or stmt0.get("date", "")[:4]
+        base_year = int(_yr_raw) if str(_yr_raw).isdigit() else 0
+
         print(f"[DCF] revenues={revenues}")
         print(f"[DCF] fcfs={fcfs}")
         print(f"[DCF] interest_expenses={interest_expenses}")
+        print(f"[DCF] base_year={base_year}  base_gross_profit={base_gross_profit:.0f}  "
+              f"base_ebit={base_ebit:.0f}  base_tax_expense={base_tax_expense:.0f}")
     except Exception as exc:
-        print(f"[DCF] FAILED step 3 (revenue/FCF/interest extraction): {type(exc).__name__}: {exc}")
+        print(f"[DCF] FAILED step 3 (revenue/FCF/P&L extraction): {type(exc).__name__}: {exc}")
         raise
 
     # ── Step 4: weighted revenue growth rate ──────────────────────────────────
@@ -285,12 +314,14 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
         base_revenue     = revenues[0]
         projected_fcf    = []
         pv_projected_fcf = []
+        projected_revenue = []
         for year in range(1, PROJECTION_YEARS + 1):
             proj_revenue = base_revenue * (1 + revenue_growth_rate) ** year
             fcf          = proj_revenue * fcf_margin
             pv           = fcf / (1 + wacc) ** year
             projected_fcf.append(round(fcf, 0))
             pv_projected_fcf.append(round(pv, 0))
+            projected_revenue.append(round(proj_revenue, 0))
         pv_fcfs = sum(pv_projected_fcf)
         print(f"[DCF] projected_fcf={projected_fcf}")
         print(f"[DCF] pv_projected_fcf={pv_projected_fcf}  pv_fcfs={pv_fcfs}")
@@ -326,25 +357,34 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
 
     print(f"[DCF] SUCCESS for {ticker}")
     return DCFResult(
-        ticker               = ticker,
-        current_price        = round(current_price, 2),
-        intrinsic_value      = round(intrinsic_value, 2),
-        upside_downside      = round(upside_downside, 1),
-        risk_free_rate       = round(risk_free_rate, 4),
-        equity_risk_premium  = round(equity_risk_premium, 4),
-        beta                 = round(beta, 4),
-        cost_of_equity       = round(cost_of_equity, 4),
-        cost_of_debt         = round(cost_of_debt, 4),
-        revenue_growth_rate  = round(revenue_growth_rate, 4),
-        fcf_margin           = round(fcf_margin, 4),
-        wacc                 = round(wacc, 4),
-        terminal_growth_rate = TERMINAL_GROWTH,
-        projected_fcf        = projected_fcf,
-        pv_projected_fcf     = pv_projected_fcf,
-        pv_fcfs              = round(pv_fcfs, 0),
-        pv_terminal_value    = round(pv_terminal_value, 0),
-        enterprise_value     = round(enterprise_value, 0),
-        net_cash             = round(net_cash, 0),
-        equity_value         = round(equity_value, 0),
-        shares_outstanding   = shares_outstanding,
+        ticker                  = ticker,
+        current_price           = round(current_price, 2),
+        intrinsic_value         = round(intrinsic_value, 2),
+        upside_downside         = round(upside_downside, 1),
+        risk_free_rate          = round(risk_free_rate, 4),
+        equity_risk_premium     = round(equity_risk_premium, 4),
+        beta                    = round(beta, 4),
+        cost_of_equity          = round(cost_of_equity, 4),
+        cost_of_debt            = round(cost_of_debt, 4),
+        revenue_growth_rate     = round(revenue_growth_rate, 4),
+        fcf_margin              = round(fcf_margin, 4),
+        wacc                    = round(wacc, 4),
+        terminal_growth_rate    = TERMINAL_GROWTH,
+        projected_fcf           = projected_fcf,
+        pv_projected_fcf        = pv_projected_fcf,
+        projected_revenue       = projected_revenue,
+        pv_fcfs                 = round(pv_fcfs, 0),
+        pv_terminal_value       = round(pv_terminal_value, 0),
+        enterprise_value        = round(enterprise_value, 0),
+        net_cash                = round(net_cash, 0),
+        equity_value            = round(equity_value, 0),
+        shares_outstanding      = shares_outstanding,
+        base_revenue            = revenues[0],
+        base_cost_of_revenue    = base_cost_of_revenue,
+        base_gross_profit       = base_gross_profit,
+        base_operating_expenses = base_operating_expenses,
+        base_ebit               = base_ebit,
+        base_tax_expense        = base_tax_expense,
+        base_fcf_actual         = base_fcf_actual,
+        base_year               = base_year,
     )

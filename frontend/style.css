@@ -429,6 +429,155 @@ main {
 .bridge-row .bridge-sign { color: var(--muted); font-size: .8rem; margin-right: 6px; }
 .bridge-row.subtotal .bridge-sign { color: var(--text); }
 
+/* ── DCF Projection Table ── */
+
+.dcf-proj-wrapper {
+  margin-bottom: 28px;
+}
+
+.dcf-proj-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.dcf-proj-title {
+  font-size: .93rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dcf-proj-subtitle {
+  font-size: .75rem;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.btn-recalc {
+  padding: 8px 18px;
+  background: var(--navy);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: .82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background .15s, opacity .15s;
+}
+.btn-recalc:hover:not(:disabled) { background: #16304f; }
+.btn-recalc:disabled { opacity: .55; cursor: not-allowed; }
+
+.proj-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.dcf-proj-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .82rem;
+  min-width: 580px;
+}
+
+.dcf-proj-table thead tr { background: #f8fafc; }
+
+.dcf-proj-table th {
+  padding: 10px 16px;
+  text-align: right;
+  font-size: .67rem;
+  font-weight: 700;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+.dcf-proj-table th.col-label { text-align: left; min-width: 158px; }
+.dcf-proj-table th.col-actual { background: #f1f5f9; color: #94a3b8; }
+
+/* Body cells */
+.dcf-proj-table td {
+  padding: 7px 16px;
+  text-align: right;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+.dcf-proj-table td:first-child {
+  text-align: left;
+  color: var(--text);
+  font-size: .8rem;
+}
+.dcf-proj-table td.col-actual {
+  background: #f8fafc;
+  color: #64748b;
+}
+
+/* Bold data rows */
+.dcf-proj-table tr.row-bold td { font-weight: 600; }
+.dcf-proj-table tr.row-bold td:first-child { font-weight: 700; }
+
+/* Italic % driver rows */
+.dcf-proj-table tr.row-italic td {
+  font-style: italic;
+  color: var(--muted);
+  font-size: .78rem;
+  padding-top: 3px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid transparent;
+}
+.dcf-proj-table tr.row-italic td:first-child { padding-left: 26px; }
+
+/* Cost rows (CoR, OpEx, Tax) */
+.dcf-proj-table tr.row-cost td { color: #64748b; }
+.dcf-proj-table tr.row-cost td:first-child { color: var(--text); }
+
+/* FCF highlight rows */
+.dcf-proj-table tr.row-fcf td {
+  background: #f0f4ff;
+  color: var(--navy);
+  font-weight: 700;
+  border-top: 2px solid var(--border);
+}
+.dcf-proj-table tr.row-fcf-italic td {
+  background: #f0f4ff;
+  border-bottom: none;
+}
+
+/* Editable italic cells */
+.dcf-proj-table td.cell-editable {
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background .1s;
+}
+.dcf-proj-table td.cell-editable:hover { background: #eff6ff; }
+
+/* Overridden (user-edited) cells */
+.dcf-proj-table td.cell-overridden {
+  background: #eff6ff;
+  color: var(--blue);
+  font-weight: 600;
+  font-style: italic;
+}
+
+/* Active input cell */
+.dcf-proj-table td.cell-editing { padding: 4px 10px; }
+.dcf-proj-table td.cell-editing input {
+  width: 68px;
+  text-align: right;
+  padding: 4px 6px;
+  border: 1.5px solid var(--blue);
+  border-radius: 4px;
+  font-size: .78rem;
+  font-style: italic;
+  background: #eff6ff;
+  color: var(--blue);
+  outline: none;
+}
+
 /* DCF sector warning */
 .dcf-warning {
   background: var(--risk-bg);
