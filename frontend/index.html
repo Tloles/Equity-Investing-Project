@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Equity Analyst</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #f1f5f9;
+      --surface:      #ffffff;
+      --border:       #e2e8f0;
+      --text:         #1e293b;
+      --muted:        #64748b;
+      --navy:         #1e3a5f;
+      --blue:         #2563eb;
+      --blue-dark:    #1d4ed8;
+      --bull:         #16a34a;
+      --bull-bg:      #f0fdf4;
+      --bull-border:  #86efac;
+      --bear:         #dc2626;
+      --bear-bg:      #fef2f2;
+      --bear-border:  #fca5a5;
+      --risk:         #d97706;
+      --risk-bg:      #fffbeb;
+      --risk-border:  #fcd34d;
+      --radius:       12px;
+      --shadow:       0 1px 3px rgba(0,0,0,.07), 0 1px 2px rgba(0,0,0,.05);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--navy);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,.18);
+    }
+
+    .header-inner {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .logo {
+      font-weight: 700;
+      font-size: 1.05rem;
+      color: #fff;
+      letter-spacing: -.2px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .logo span { color: #93c5fd; }
+
+    #search-form {
+      display: flex;
+      gap: 8px;
+      flex: 1;
+    }
+
+    #ticker-input {
+      flex: 1;
+      max-width: 180px;
+      padding: 8px 14px;
+      border: 1.5px solid rgba(255,255,255,.22);
+      border-radius: 8px;
+      background: rgba(255,255,255,.1);
+      color: #fff;
+      font-size: .95rem;
+      font-weight: 600;
+      letter-spacing: .8px;
+      text-transform: uppercase;
+      outline: none;
+      transition: border-color .15s, background .15s;
+    }
+    #ticker-input::placeholder { color: rgba(255,255,255,.38); text-transform: none; letter-spacing: 0; font-weight: 400; }
+    #ticker-input:focus { border-color: rgba(255,255,255,.55); background: rgba(255,255,255,.15); }
+
+    #analyze-btn {
+      padding: 8px 22px;
+      background: var(--blue);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: .92rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+      white-space: nowrap;
+    }
+    #analyze-btn:hover:not(:disabled) { background: var(--blue-dark); }
+    #analyze-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── Main ── */
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 36px 24px 72px;
+    }
+
+    /* ── Empty state ── */
+    #empty-state {
+      text-align: center;
+      padding: 90px 0 60px;
+      color: var(--muted);
+    }
+    .hero-icon { font-size: 3.2rem; margin-bottom: 18px; }
+    #empty-state h2 { font-size: 1.45rem; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+    #empty-state p { font-size: .95rem; line-height: 1.65; max-width: 400px; margin: 0 auto; }
+
+    /* ── Loading ── */
+    #loading { text-align: center; padding: 90px 0; }
+    .spinner {
+      width: 42px; height: 42px;
+      border: 3px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+      margin: 0 auto 22px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading p { color: var(--muted); font-size: .95rem; line-height: 1.6; }
+    #loading .sub { font-size: .85rem; margin-top: 5px; }
+
+    /* ── Error ── */
+    #error-state {
+      background: #fef2f2;
+      border: 1.5px solid var(--bear-border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    #error-state strong { display: block; color: #991b1b; margin-bottom: 6px; font-size: .95rem; }
+    #error-state p { color: #b91c1c; font-size: .88rem; line-height: 1.55; }
+
+    /* ── Meta bar ── */
+    .meta-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 22px;
+    }
+
+    .ticker-badge {
+      background: var(--navy);
+      color: #fff;
+      font-weight: 700;
+      font-size: .95rem;
+      padding: 5px 14px;
+      border-radius: 7px;
+      letter-spacing: .6px;
+    }
+
+    .meta-chip {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 7px;
+      padding: 4px 12px;
+      font-size: .8rem;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .meta-chip b { color: var(--text); font-weight: 600; }
+
+    .no-transcript {
+      background: #fffbeb;
+      border-color: var(--risk-border);
+      color: var(--risk);
+    }
+    .no-transcript b { color: var(--risk); }
+
+    /* ── Grid ── */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    @media (max-width: 580px) { .two-col { grid-template-columns: 1fr; } }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 24px;
+      border-top: 3px solid transparent;
+    }
+    .card + .card { margin-top: 0; }  /* handled by gap / margin-bottom */
+
+    .card.bull   { border-top-color: var(--bull); }
+    .card.bear   { border-top-color: var(--bear); }
+    .card.risks  { border-top-color: var(--risk);  margin-bottom: 16px; }
+    .card.summary{ border-top-color: #94a3b8; }
+
+    /* Card header */
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 18px;
+    }
+
+    .card-icon {
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: .8rem;
+      flex-shrink: 0;
+    }
+    .bull  .card-icon { background: var(--bull-bg); color: var(--bull); }
+    .bear  .card-icon { background: var(--bear-bg); color: var(--bear); }
+    .risks .card-icon { background: var(--risk-bg); color: var(--risk); }
+
+    .card-title {
+      font-size: .72rem;
+      font-weight: 700;
+      letter-spacing: .9px;
+      text-transform: uppercase;
+    }
+    .bull  .card-title { color: var(--bull); }
+    .bear  .card-title { color: var(--bear); }
+    .risks .card-title { color: var(--risk); }
+    .summary .card-title { color: #64748b; }
+
+    /* Lists */
+    .card ol {
+      list-style: none;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+
+    .card li {
+      display: flex;
+      gap: 10px;
+      font-size: .875rem;
+      line-height: 1.6;
+      color: #334155;
+    }
+
+    .num {
+      flex-shrink: 0;
+      width: 20px; height: 20px;
+      border-radius: 5px;
+      font-size: .7rem;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      margin-top: 2px;
+    }
+    .bull  .num { background: var(--bull-bg); color: var(--bull); }
+    .bear  .num { background: var(--bear-bg); color: var(--bear); }
+    .risks .num { background: var(--risk-bg); color: var(--risk); }
+
+    /* Summary */
+    .card.summary p {
+      font-size: .925rem;
+      line-height: 1.75;
+      color: #334155;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <span class="logo">Equity <span>Analyst</span></span>
+    <form id="search-form">
+      <input
+        id="ticker-input"
+        type="text"
+        placeholder="e.g. AAPL"
+        autocomplete="off"
+        spellcheck="false"
+        maxlength="10"
+      />
+      <button type="submit" id="analyze-btn">Analyze &#8594;</button>
+    </form>
+  </div>
+</header>
+
+<main>
+
+  <!-- Empty state -->
+  <div id="empty-state">
+    <div class="hero-icon">&#128202;</div>
+    <h2>AI-Powered Equity Analysis</h2>
+    <p>
+      Enter a ticker above to pull the latest 10-K filing and earnings call
+      transcript, then get a structured bull/bear analysis from Claude.
+    </p>
+  </div>
+
+  <!-- Loading -->
+  <div id="loading" hidden>
+    <div class="spinner"></div>
+    <p>Fetching filings and running analysis&hellip;</p>
+    <p class="sub">This may take 20&ndash;40 seconds.</p>
+  </div>
+
+  <!-- Error -->
+  <div id="error-state" hidden>
+    <strong>Analysis failed</strong>
+    <p id="error-msg"></p>
+  </div>
+
+  <!-- Results -->
+  <div id="results" hidden>
+
+    <div class="meta-bar" id="meta-bar"></div>
+
+    <div class="two-col">
+      <!-- Bull -->
+      <div class="card bull">
+        <div class="card-header">
+          <div class="card-icon">&#9650;</div>
+          <span class="card-title">Bull Case</span>
+        </div>
+        <ol id="bull-list"></ol>
+      </div>
+
+      <!-- Bear -->
+      <div class="card bear">
+        <div class="card-header">
+          <div class="card-icon">&#9660;</div>
+          <span class="card-title">Bear Case</span>
+        </div>
+        <ol id="bear-list"></ol>
+      </div>
+    </div>
+
+    <!-- Downplayed risks -->
+    <div class="card risks">
+      <div class="card-header">
+        <div class="card-icon">&#9888;</div>
+        <span class="card-title">Downplayed Risks</span>
+      </div>
+      <ol id="risks-list"></ol>
+    </div>
+
+    <!-- Analyst summary -->
+    <div class="card summary">
+      <div class="card-header">
+        <span class="card-title">Analyst Summary</span>
+      </div>
+      <p id="summary-text"></p>
+    </div>
+
+  </div><!-- /results -->
+
+</main>
+
+<script>
+  const form       = document.getElementById('search-form');
+  const input      = document.getElementById('ticker-input');
+  const btn        = document.getElementById('analyze-btn');
+  const emptyState = document.getElementById('empty-state');
+  const loadingEl  = document.getElementById('loading');
+  const errorState = document.getElementById('error-state');
+  const errorMsg   = document.getElementById('error-msg');
+  const resultsEl  = document.getElementById('results');
+
+  const show = el => { el.hidden = false; };
+  const hide = el => { el.hidden = true; };
+
+  function setLoading(on) {
+    btn.disabled = on;
+    btn.textContent = on ? 'Analyzing\u2026' : 'Analyze \u2192';
+  }
+
+  function renderList(listEl, items) {
+    listEl.innerHTML = items.map((text, i) => `
+      <li>
+        <span class="num">${i + 1}</span>
+        <span>${escapeHtml(text)}</span>
+      </li>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function renderMeta(data) {
+    const bar = document.getElementById('meta-bar');
+
+    let transcriptChip;
+    if (data.transcript_available) {
+      transcriptChip = `<span class="meta-chip">Transcript <b>Q${data.transcript_quarter} ${data.transcript_year}</b></span>`;
+    } else {
+      transcriptChip = `<span class="meta-chip no-transcript"><b>No transcript available</b></span>`;
+    }
+
+    bar.innerHTML = `
+      <span class="ticker-badge">${escapeHtml(data.ticker)}</span>
+      <span class="meta-chip">10-K filed <b>${escapeHtml(data.filing_date)}</b></span>
+      ${transcriptChip}
+    `;
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const ticker = input.value.trim().toUpperCase();
+    if (!ticker) return;
+
+    // Transition to loading
+    hide(emptyState);
+    hide(errorState);
+    hide(resultsEl);
+    show(loadingEl);
+    setLoading(true);
+
+    try {
+      const res  = await fetch(`/analyze/${encodeURIComponent(ticker)}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || `Unexpected error (HTTP ${res.status})`);
+      }
+
+      renderMeta(data);
+      renderList(document.getElementById('bull-list'),  data.bull_case);
+      renderList(document.getElementById('bear-list'),  data.bear_case);
+      renderList(document.getElementById('risks-list'), data.downplayed_risks);
+      document.getElementById('summary-text').textContent = data.analyst_summary;
+
+      hide(loadingEl);
+      show(resultsEl);
+
+    } catch (err) {
+      errorMsg.textContent = err.message;
+      hide(loadingEl);
+      show(errorState);
+    } finally {
+      setLoading(false);
+    }
+  });
+</script>
+
+</body>
+</html>
