@@ -322,16 +322,47 @@ materials for {ticker} and produce a rigorous industry analysis.
 --- LATEST EARNINGS CALL TRANSCRIPT ---
 {transcript_snippet}
 
-Based solely on these materials, use the `provide_industry_analysis` tool to return:
-1. Porter's Five Forces — rate each force (Low/Medium/High) with a 2-3 sentence
-   evidence-backed explanation drawn from the documents.
-2. Industry Structure — 2-3 paragraphs on overall industry dynamics.
-3. Competitive Position — where {ticker} sits vs peers; its moats and differentiators.
-4. Key Industry KPIs — 3-5 metrics most critical to monitor for this sector.
-5. Industry Tailwinds — exactly 3 macro or structural trends benefiting the industry.
-6. Industry Headwinds — exactly 3 macro or structural trends threatening the industry.
+Use the `provide_industry_analysis` tool. You MUST populate ALL 10 fields listed
+below — the tool call is invalid if any field is missing or empty.
 
-Ground every point in specific details from the documents above."""
+REQUIRED FIELDS (all 10 must be present):
+
+1. threat_of_new_entrants       — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
+2. bargaining_power_of_suppliers — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
+3. bargaining_power_of_buyers   — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
+4. threat_of_substitutes        — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
+5. competitive_rivalry          — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
+6. industry_structure           — a PLAIN STRING (not an object, not nested JSON) of 2-3 paragraphs
+                                   describing overall industry dynamics. Use "\\n\\n" between paragraphs.
+7. competitive_position         — a PLAIN STRING describing where {ticker} sits vs competitors,
+                                   its moats, and its key differentiators.
+8. key_kpis                     — array of 3-5 objects, each with exactly two string fields:
+                                     "metric"         (KPI name, e.g. "Net Revenue Retention")
+                                     "why_it_matters" (1-2 sentence explanation)
+9. tailwinds                    — array of EXACTLY 3 strings, each a macro/structural trend
+                                   benefiting the industry
+10. headwinds                   — array of EXACTLY 3 strings, each a macro/structural trend
+                                   threatening the industry
+
+EXAMPLE of the exact shape required (use real content, not these placeholders):
+{{
+  "threat_of_new_entrants":        {{"rating": "Low",    "explanation": "..."}},
+  "bargaining_power_of_suppliers": {{"rating": "Medium", "explanation": "..."}},
+  "bargaining_power_of_buyers":    {{"rating": "High",   "explanation": "..."}},
+  "threat_of_substitutes":         {{"rating": "Low",    "explanation": "..."}},
+  "competitive_rivalry":           {{"rating": "High",   "explanation": "..."}},
+  "industry_structure":   "Paragraph one.\\n\\nParagraph two.\\n\\nParagraph three.",
+  "competitive_position": "Single block of text describing competitive standing.",
+  "key_kpis": [
+    {{"metric": "Annual Recurring Revenue", "why_it_matters": "..."}},
+    {{"metric": "Net Revenue Retention",    "why_it_matters": "..."}},
+    {{"metric": "Customer Acquisition Cost","why_it_matters": "..."}}
+  ],
+  "tailwinds": ["Trend one.", "Trend two.", "Trend three."],
+  "headwinds": ["Risk one.",  "Risk two.",  "Risk three."]
+}}
+
+Ground every point in specific details from the source documents above."""
 
 
 def analyze_industry(
@@ -375,6 +406,10 @@ def analyze_industry(
         raise ValueError("Claude did not return an industry analysis tool call.")
 
     d = tool_use_block.input
+
+    import json as _json
+    print(f"[industry] Raw Claude response:\n{_json.dumps(d, indent=2)}")
+    print(f"[industry] Keys found: {list(d.keys())}")
 
     # ── Defensive key resolution helpers ──────────────────────────────────────
 
@@ -474,11 +509,24 @@ def analyze_industry(
         ["competitive_rivalry", "rivalry"],
     )
 
-    industry_structure = _pick(
+    industry_structure_raw = _pick(
         ["industry_structure", "structure", "industry_overview",
          "market_structure", "overview"],
         default="",
     )
+    # Claude occasionally returns a nested object instead of a plain string;
+    # flatten it to text so the frontend always receives a string.
+    if isinstance(industry_structure_raw, dict):
+        import json as _json2
+        industry_structure = " ".join(
+            str(v) for v in industry_structure_raw.values() if v
+        )
+        print(f"[industry] WARNING: industry_structure was a dict, flattened to string")
+    elif isinstance(industry_structure_raw, list):
+        industry_structure = "\n\n".join(str(item) for item in industry_structure_raw if item)
+        print(f"[industry] WARNING: industry_structure was a list, joined to string")
+    else:
+        industry_structure = industry_structure_raw
 
     competitive_position = _pick(
         ["competitive_position", "position", "company_position",
@@ -511,7 +559,7 @@ def analyze_industry(
         bargaining_power_of_buyers=buyer_power,
         threat_of_substitutes=threat_subs,
         competitive_rivalry=rivalry,
-        industry_structure=industry_structure if isinstance(industry_structure, str) else str(industry_structure),
+        industry_structure=industry_structure,
         competitive_position=competitive_position if isinstance(competitive_position, str) else str(competitive_position),
         key_kpis=_parse_kpis(raw_kpis) if isinstance(raw_kpis, list) else [],
         tailwinds=[str(t) for t in tailwinds] if isinstance(tailwinds, list) else [],

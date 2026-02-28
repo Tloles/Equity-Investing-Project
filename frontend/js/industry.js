@@ -96,6 +96,11 @@ function renderIndustry(data) {
 
   const ia = data.industry_analysis;
 
+  console.log('[industry] Full industry_analysis object:', ia);
+  console.log('[industry] key_kpis:', ia.key_kpis);
+  console.log('[industry] tailwinds:', ia.tailwinds);
+  console.log('[industry] headwinds:', ia.headwinds);
+
   renderPorterGrid(ia);
   renderIndustryStructure(ia.industry_structure);
 
