@@ -73,10 +73,10 @@ function renderPriceWidget(data) {
 function renderSourceDocs(data) {
   const el = document.getElementById('source-docs');
 
-  const hasFilings    = data.filing_urls && data.filing_urls.length > 0;
-  const hasTranscript = data.transcript_available && data.transcript_url;
+  const hasFilings     = data.filing_urls && data.filing_urls.length > 0;
+  const hasTranscripts = data.transcript_urls && data.transcript_urls.length > 0;
 
-  if (!hasFilings && !hasTranscript) {
+  if (!hasFilings && !hasTranscripts) {
     hide(el);
     return;
   }
@@ -90,10 +90,12 @@ function renderSourceDocs(data) {
     html += `<div class="source-group"><span class="source-label">10-K Filings</span>${links}</div>`;
   }
 
-  if (hasTranscript) {
-    const label = `Q${data.transcript_quarter} ${data.transcript_year}`;
-    html += `<div class="source-group"><span class="source-label">Earnings Transcripts</span>` +
-      `<a class="source-link" href="${data.transcript_url}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} &#8599;</a></div>`;
+  if (hasTranscripts) {
+    const links = data.transcript_urls.map(t => {
+      const label = (t.quarter && t.year) ? `Q${t.quarter} ${t.year}` : 'Transcript';
+      return `<a class="source-link" href="${t.url}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} &#8599;</a>`;
+    }).join('');
+    html += `<div class="source-group"><span class="source-label">Earnings Transcripts</span>${links}</div>`;
   }
 
   el.innerHTML = html;

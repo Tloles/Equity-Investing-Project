@@ -3,7 +3,7 @@ Equity Analysis API — FastAPI entry point.
 
 Wires together:
   - backend.sec_fetcher        (SEC EDGAR 10-K — no API key)
-  - backend.transcript_fetcher (FMP earnings call transcript)
+  - backend.transcript_fetcher (Motley Fool earnings call transcript)
   - backend.analyzer           (Claude bull/bear analysis)
   - backend.dcf                (DCF intrinsic value)
 
@@ -68,6 +68,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 class FilingLink(BaseModel):
     year: int
+    url: str
+
+
+class TranscriptLink(BaseModel):
+    quarter: Optional[int] = None
+    year: Optional[int] = None
     url: str
 
 
@@ -139,7 +145,7 @@ class AnalysisResponse(BaseModel):
 
     # Source document links
     filing_urls: List[FilingLink] = []
-    transcript_url: Optional[str] = None
+    transcript_urls: List[TranscriptLink] = []
 
     # Price widget / DCF (best-effort — None if FMP data unavailable)
     dcf_available: bool
@@ -294,7 +300,7 @@ async def recalculate_dcf(ticker: str, req: RecalculateRequest) -> RecalculateRe
 async def analyze_ticker(ticker: str) -> AnalysisResponse:
     """
     1. Fetch the latest 10-K MD&A + Risk Factors from SEC EDGAR.
-    2. Fetch the latest earnings call transcript from FMP (best-effort).
+    2. Fetch the latest earnings call transcript from Motley Fool (best-effort).
     3. Send both to Claude and return a structured bull/bear analysis.
 
     Both upstream fetches run concurrently. If the transcript or DCF is
@@ -319,7 +325,10 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
     # ------------------------------------------------------------------
     results = await asyncio.gather(
         asyncio.to_thread(fetch_10k_sections, ticker),
-        asyncio.to_thread(fetch_latest_transcript, ticker),
+        asyncio.to_thread(
+            fetch_latest_transcript, ticker,
+            sector_info.company_name if sector_info else "",
+        ),
         asyncio.to_thread(fetch_dcf, ticker, sector_info),
         return_exceptions=True,
     )
@@ -415,7 +424,10 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         transcript_date=transcript_data["date"] if transcript_data else None,
         transcript_quarter=transcript_data["quarter"] if transcript_data else None,
         transcript_year=transcript_data["year"] if transcript_data else None,
-        transcript_url=transcript_data.get("url") if transcript_data else None,
+        transcript_urls=[
+            TranscriptLink(**t)
+            for t in (transcript_data.get("all_transcripts") or [])
+        ] if transcript_data else [],
         dcf_available=dcf_available,
         current_price=dcf_data.current_price if dcf_data else None,
         intrinsic_value=dcf_data.intrinsic_value if dcf_data else None,

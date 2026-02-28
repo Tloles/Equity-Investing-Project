@@ -23,9 +23,10 @@ FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 @dataclass
 class SectorInfo:
     ticker: str
-    sector: str    # e.g. "Technology"
-    industry: str  # e.g. "Software—Application"
-    beta: float    # 0.0 if not available from profile
+    sector: str        # e.g. "Technology"
+    industry: str      # e.g. "Software—Application"
+    beta: float        # 0.0 if not available from profile
+    company_name: str  # e.g. "Apple Inc." — used for transcript validation
 
 
 def fetch_sector_info(ticker: str) -> SectorInfo:
@@ -54,10 +55,11 @@ def fetch_sector_info(ticker: str) -> SectorInfo:
     if not data:
         raise ValueError(f"FMP profile returned empty data for {ticker}")
 
-    profile  = data[0]
-    sector   = profile.get("sector")   or ""
-    industry = profile.get("industry") or ""
-    beta     = float(profile.get("beta") or 0)
+    profile      = data[0]
+    sector       = profile.get("sector")      or ""
+    industry     = profile.get("industry")    or ""
+    beta         = float(profile.get("beta")  or 0)
+    company_name = profile.get("companyName") or ""
 
-    print(f"[industry] {ticker}: sector={sector!r}  industry={industry!r}  beta={beta}")
-    return SectorInfo(ticker=ticker, sector=sector, industry=industry, beta=beta)
+    print(f"[industry] {ticker}: sector={sector!r}  industry={industry!r}  beta={beta}  company={company_name!r}")
+    return SectorInfo(ticker=ticker, sector=sector, industry=industry, beta=beta, company_name=company_name)
