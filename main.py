@@ -126,6 +126,29 @@ class DCFModel(BaseModel):
     equity_value: float
 
 
+class PorterForceItem(BaseModel):
+    rating: str
+    explanation: str
+
+
+class IndustryKPI(BaseModel):
+    metric: str
+    why_it_matters: str
+
+
+class IndustryAnalysis(BaseModel):
+    threat_of_new_entrants: PorterForceItem
+    bargaining_power_of_suppliers: PorterForceItem
+    bargaining_power_of_buyers: PorterForceItem
+    threat_of_substitutes: PorterForceItem
+    competitive_rivalry: PorterForceItem
+    industry_structure: str
+    competitive_position: str
+    key_kpis: List[IndustryKPI]
+    tailwinds: List[str]
+    headwinds: List[str]
+
+
 class AnalysisResponse(BaseModel):
     ticker: str
 
@@ -163,29 +186,6 @@ class AnalysisResponse(BaseModel):
 
     # Industry analysis (best-effort — None if Claude call fails)
     industry_analysis: Optional[IndustryAnalysis] = None
-
-
-class PorterForceItem(BaseModel):
-    rating: str
-    explanation: str
-
-
-class IndustryKPI(BaseModel):
-    metric: str
-    why_it_matters: str
-
-
-class IndustryAnalysis(BaseModel):
-    threat_of_new_entrants: PorterForceItem
-    bargaining_power_of_suppliers: PorterForceItem
-    bargaining_power_of_buyers: PorterForceItem
-    threat_of_substitutes: PorterForceItem
-    competitive_rivalry: PorterForceItem
-    industry_structure: str
-    competitive_position: str
-    key_kpis: List[IndustryKPI]
-    tailwinds: List[str]
-    headwinds: List[str]
 
 
 class RecalculateRequest(BaseModel):
