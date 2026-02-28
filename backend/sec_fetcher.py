@@ -1,6 +1,13 @@
 """
 SEC EDGAR fetcher — retrieves MD&A (Item 7) and Risk Factors (Item 1A)
 from a company's latest 10-K filing using the public EDGAR API (no key required).
+
+Public exports reused by other modules
+---------------------------------------
+  get_cik(ticker)     — resolve ticker → zero-padded CIK string
+  HEADERS             — SEC-mandated User-Agent header dict
+  EDGAR_DATA_URL      — https://data.sec.gov
+  EDGAR_ARCHIVE_URL   — https://www.sec.gov/Archives/edgar/data
 """
 
 import re

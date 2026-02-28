@@ -1,250 +1,210 @@
 """
-Transcript fetcher — scrapes up to 12 quarters of earnings call transcripts
-from Motley Fool, combining them for Claude analysis.
+Transcript fetcher — retrieves up to 12 quarters of earnings call transcripts
+from SEC EDGAR 8-K filings (no API key required).
 
-Strategy (tried in order for URL discovery)
---------------------------------------------
-1. Motley Fool ticker-filtered listing page (paginated, up to 4 pages):
-     https://www.fool.com/earnings-call-transcripts/?ticker={ticker}&page={n}
-2. Google search restricted to fool.com (paginated, up to 2 pages):
-     https://www.google.com/search?q={ticker}+earnings+call+transcript+site:fool.com&start={n}
+Strategy
+--------
+1. Resolve ticker → CIK via sec_fetcher.get_cik()
+2. Fetch the submissions JSON for the company
+3. Filter 8-K / 8-K/A filings whose "items" field contains 2.02 or 7.01
+4. For each candidate, parse the filing index page to locate the best EX-99
+   exhibit (prefer those with "transcript" / "earnings call" in description/type)
+5. Fetch and parse the exhibit text
+6. Infer the earnings quarter and year from text content (or fall back to
+   the filing date)
 
-Each candidate URL is validated against the ticker and company name before
-being scraped.  Up to MAX_TRANSCRIPTS articles are fetched and their content
-is combined into a single string for the analysis pipeline.
-
-No API key required.
+Returns at most MAX_TRANSCRIPTS results, newest first.
 """
 
 import re
-from typing import List, Optional
-from urllib.parse import unquote
+from typing import List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+from .sec_fetcher import EDGAR_ARCHIVE_URL, EDGAR_DATA_URL, HEADERS, get_cik
 
-MF_LISTING_URL    = "https://www.fool.com/earnings-call-transcripts/"
-GOOGLE_SEARCH_URL = "https://www.google.com/search"
 MAX_TRANSCRIPTS   = 12
+_TRANSCRIPT_ITEMS = frozenset({"2.02", "7.01"})
+_SKIP_KEYWORDS    = ("press release", "news release", "financial results")
 
 
-# ── Ticker / company match validation ─────────────────────────────────────────
+# ── Helper: fetch submissions JSON ────────────────────────────────────────────
 
-def _validate_match(ticker: str, company_name: str, url: str) -> bool:
+def _fetch_submissions(cik: str) -> dict:
+    url  = f"{EDGAR_DATA_URL}/submissions/CIK{cik}.json"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── Helper: find candidate 8-K filings ───────────────────────────────────────
+
+def _candidate_8ks(submissions: dict) -> List[Tuple[str, str]]:
     """
-    Return True if `url` plausibly refers to the given ticker / company.
-
-    Checks:
-    - ticker.lower() as a substring of the URL path (reliable for 3+ char tickers)
-    - First long word (>= 4 chars) of company_name in the URL path
-      (handles cases where the URL slug uses the company name, not the ticker,
-       e.g. ticker "F" → slug "ford", ticker "GOOGL" → slug "alphabet")
+    Return (accession_number, filing_date) tuples for 8-K / 8-K/A filings
+    whose 'items' field contains at least one transcript-related item (2.02 / 7.01),
+    newest first, up to 2*MAX_TRANSCRIPTS candidates.
     """
-    slug = url.lower()
-    t    = ticker.lower()
+    recent     = submissions["filings"]["recent"]
+    forms      = recent["form"]
+    accessions = recent["accessionNumber"]
+    dates      = recent["filingDate"]
+    items_list = recent.get("items", [""] * len(forms))
 
-    if len(t) >= 3 and t in slug:
-        return True
-
-    if company_name:
-        # Strip common corporate suffixes and pick the first substantive word
-        cleaned = re.sub(
-            r"\b(inc|corp|llc|ltd|co|the|plc|sa|ag|nv|group|holdings|company)\b",
-            "", company_name, flags=re.I,
-        )
-        words = [w for w in re.split(r"[\s,./]+", cleaned) if len(w) >= 4]
-        if words and words[0].lower() in slug:
-            return True
-
-    # Short ticker (1–2 chars): require it as a hyphen-delimited slug segment
-    if len(t) < 3:
-        if re.search(rf"(?:^|[-/]){re.escape(t)}(?:[-/]|$)", slug):
-            return True
-
-    return False
-
-
-# ── URL collection — Motley Fool listing pages ────────────────────────────────
-
-def _collect_mf_urls(ticker: str, company_name: str) -> List[str]:
-    """
-    Paginate through the Motley Fool ticker-filtered transcript listing and
-    return validated article URLs (newest first, up to MAX_TRANSCRIPTS).
-    """
-    urls: List[str] = []
-    seen: set       = set()
-
-    for page in range(1, 5):                           # try up to 4 pages
-        if len(urls) >= MAX_TRANSCRIPTS:
-            break
-
-        listing_url = f"{MF_LISTING_URL}?ticker={ticker}&page={page}"
-        print(f"[transcript] Search URL being fetched: {listing_url}")
-
-        try:
-            resp = requests.get(listing_url, headers=_HEADERS, timeout=15)
-            print(f"[transcript] Search response status: {resp.status_code}")
-            if resp.status_code != 200:
+    results: List[Tuple[str, str]] = []
+    for i, form in enumerate(forms):
+        if form not in ("8-K", "8-K/A"):
+            continue
+        filing_items = set(re.split(r"[,\s]+", items_list[i]))
+        if filing_items & _TRANSCRIPT_ITEMS:
+            results.append((accessions[i], dates[i]))
+            if len(results) >= 2 * MAX_TRANSCRIPTS:
                 break
-        except Exception as exc:
-            print(f"[transcript] Search request failed: {type(exc).__name__}: {exc}")
-            break
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        found_this_page = 0
-
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "transcript" not in href.lower():
-                continue
-            if not (href.startswith("https://www.fool.com") or href.startswith("/")):
-                continue
-
-            full = href if href.startswith("http") else "https://www.fool.com" + href
-            if full in seen:
-                continue
-            seen.add(full)
-
-            match = _validate_match(ticker, company_name, full)
-            print(
-                f"[transcript] Validating match for {ticker}: {full} "
-                f"— {'MATCH' if match else 'SKIP'}"
-            )
-            if match:
-                urls.append(full)
-                found_this_page += 1
-                if len(urls) >= MAX_TRANSCRIPTS:
-                    break
-
-        if found_this_page == 0:
-            break                                      # no new results — stop paging
-
-    return urls
+    return results
 
 
-# ── URL collection — Google search fallback ───────────────────────────────────
+# ── Helper: find the best exhibit URL from a filing's index page ──────────────
 
-def _collect_google_urls(ticker: str, company_name: str) -> List[str]:
+def _find_exhibit_url(cik_int: int, accession: str) -> Optional[str]:
     """
-    Search Google restricted to fool.com and return validated transcript URLs
-    (up to MAX_TRANSCRIPTS, across two result pages).
+    Fetch the filing's index page and return the URL of the best EX-99 exhibit.
+
+    Priority 0 (preferred): description or type contains 'transcript' or 'earnings call'
+    Priority 1 (fallback):  any EX-99.x exhibit not obviously a press release
     """
-    urls: List[str] = []
-    seen: set       = set()
-    query = f"{ticker} earnings call transcript site:fool.com"
+    acc_clean = accession.replace("-", "")
+    index_url = (
+        f"{EDGAR_ARCHIVE_URL}/{cik_int}/{acc_clean}/{accession}-index.htm"
+    )
 
-    for start in (0, 10):                              # two Google result pages
-        if len(urls) >= MAX_TRANSCRIPTS:
-            break
-
-        search_url = (
-            f"{GOOGLE_SEARCH_URL}?q={query.replace(' ', '+')}"
-            + (f"&start={start}" if start else "")
-        )
-        print(f"[transcript] Search URL being fetched: {search_url}")
-
-        try:
-            resp = requests.get(
-                GOOGLE_SEARCH_URL,
-                params={"q": query, **({"start": start} if start else {})},
-                headers=_HEADERS,
-                timeout=15,
-            )
-            print(f"[transcript] Search response status: {resp.status_code}")
-            if resp.status_code != 200:
-                break
-        except Exception as exc:
-            print(f"[transcript] Search request failed: {type(exc).__name__}: {exc}")
-            break
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        found_this_page = 0
-
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-
-            # Unwrap Google's /url?q=https://... redirect wrapper
-            if href.startswith("/url?q="):
-                m = re.search(r"/url\?q=(https://www\.fool\.com[^&]+)", href)
-                if m:
-                    href = unquote(m.group(1))
-
-            if not (
-                href.startswith("https://www.fool.com")
-                and "transcript" in href.lower()
-            ):
-                continue
-            if href in seen:
-                continue
-            seen.add(href)
-
-            match = _validate_match(ticker, company_name, href)
-            print(
-                f"[transcript] Validating match for {ticker}: {href} "
-                f"— {'MATCH' if match else 'SKIP'}"
-            )
-            if match:
-                urls.append(href)
-                found_this_page += 1
-                if len(urls) >= MAX_TRANSCRIPTS:
-                    break
-
-        if found_this_page == 0 and start > 0:
-            break                                      # no new results on page 2
-
-    return urls
-
-
-# ── Single article scraper ────────────────────────────────────────────────────
-
-def _scrape_one(article_url: str) -> Optional[dict]:
-    """
-    Fetch and parse one Motley Fool transcript article.
-    Returns a dict with quarter, year, url, content, or None on any failure.
-    """
     try:
-        resp = requests.get(article_url, headers=_HEADERS, timeout=20)
+        resp = requests.get(index_url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        print(
+            f"[transcript] Index fetch failed ({index_url}): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+    soup  = BeautifulSoup(resp.text, "html.parser")
+    table = soup.find("table", class_="tableFile")
+    if not table:
+        return None
+
+    priority_0: List[str] = []
+    priority_1: List[str] = []
+
+    for row in table.find_all("tr")[1:]:   # skip header row
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+
+        doc_type = cells[3].get_text(strip=True)
+        desc     = cells[1].get_text(strip=True).lower()
+        link_tag = cells[2].find("a", href=True)
+        if not link_tag:
+            continue
+
+        href     = link_tag["href"]
+        full_url = (
+            href if href.startswith("http") else "https://www.sec.gov" + href
+        )
+
+        if "99" not in doc_type:
+            continue
+
+        # Skip obvious press releases
+        if any(kw in desc for kw in _SKIP_KEYWORDS):
+            continue
+
+        if "transcript" in desc or "earnings call" in desc:
+            priority_0.append(full_url)
+        else:
+            priority_1.append(full_url)
+
+    if priority_0:
+        return priority_0[0]
+    if priority_1:
+        return priority_1[0]
+    return None
+
+
+# ── Helper: fetch and clean exhibit text ──────────────────────────────────────
+
+def _fetch_exhibit_text(url: str) -> Optional[str]:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=30)
         print(f"[transcript] Article fetch status: {resp.status_code}")
         resp.raise_for_status()
     except Exception as exc:
-        print(f"[transcript] Article fetch failed ({article_url}): {type(exc).__name__}: {exc}")
+        print(
+            f"[transcript] Article fetch failed ({url}): "
+            f"{type(exc).__name__}: {exc}"
+        )
         return None
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(resp.content, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
 
-    body = (
-        soup.find("div", class_=re.compile(r"article-body", re.I))
-        or soup.find("div", {"id": re.compile(r"article-body", re.I)})
-        or soup.find("article")
-    )
-
-    if not body:
-        print(f"[transcript] Article body not found: {article_url}")
-        return None
-
-    text = re.sub(r"\s+", " ", body.get_text(separator=" ", strip=True))
+    text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True))
     print(f"[transcript] Text length extracted: {len(text)} chars")
+    return text if text else None
 
-    if not text:
-        print(f"[transcript] Empty article body: {article_url}")
-        return None
 
-    # Parse quarter and year from the URL path (e.g. /2024/q3/aapl-…)
-    quarter, year = None, None
-    m = re.search(r"/(\d{4})/q(\d)/", article_url, re.I)
+# ── Helper: infer quarter and year ────────────────────────────────────────────
+
+_QTR_NAMES = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4,
+}
+
+# Approximate mapping: month of 8-K filing → earnings quarter being reported.
+# Jan–Feb 8-Ks are Q4 results from the prior fiscal year.
+_MONTH_TO_QUARTER = {
+    1: 4,  2: 4,            # Q4 of prior year
+    3: 1,  4: 1,  5: 1,    # Q1
+    6: 2,  7: 2,  8: 2,    # Q2
+    9: 3, 10: 3, 11: 3, 12: 3,  # Q3
+}
+
+
+def _parse_quarter_year(
+    text: str, filing_date: str
+) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Infer the earnings quarter and fiscal year from transcript text.
+    Falls back to filing date heuristics if text parsing fails.
+    """
+    sample = text[:3000]
+
+    # Pattern: "Q3 2024", "Q4 2023"
+    m = re.search(r"\bQ([1-4])\s+(20\d{2})\b", sample, re.I)
     if m:
-        year, quarter = int(m.group(1)), int(m.group(2))
+        return int(m.group(1)), int(m.group(2))
 
-    return {"quarter": quarter, "year": year, "url": article_url, "content": text}
+    # Pattern: "Third Quarter 2024", "First Quarter Fiscal 2025"
+    m = re.search(
+        r"\b(first|second|third|fourth)\s+quarter(?:\s+fiscal)?\s+(20\d{2})\b",
+        sample, re.I,
+    )
+    if m:
+        q = _QTR_NAMES.get(m.group(1).lower())
+        return q, int(m.group(2))
+
+    # Fall back to filing date
+    try:
+        parts = filing_date.split("-")
+        month = int(parts[1])
+        year  = int(parts[0])
+        q     = _MONTH_TO_QUARTER[month]
+        if month in (1, 2):   # Q4 of the preceding calendar year
+            year -= 1
+        return q, year
+    except Exception:
+        return None, None
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -252,64 +212,78 @@ def _scrape_one(article_url: str) -> Optional[dict]:
 def fetch_latest_transcript(ticker: str, company_name: str = "") -> dict:
     """
     Fetch up to 12 quarters of earnings call transcripts for `ticker` from
-    Motley Fool.  Tries the MF listing page first; falls back to Google search.
+    SEC EDGAR 8-K filings.
 
     Returns a dict with keys:
       - ticker
       - quarter          (int or None — most recent transcript)
       - year             (int or None — most recent transcript)
-      - date             (str — always empty; scraped results have no timestamp)
+      - date             (str — always empty; filing dates aren't exposed here)
       - content          (str — all transcripts concatenated, newest first)
-      - url              (str — most recent transcript article URL)
+      - url              (str — most recent transcript exhibit URL)
       - all_transcripts  (list of {quarter, year, url} for every found transcript)
 
-    Raises ValueError if no transcripts can be found via either method.
+    Raises ValueError if no transcripts can be found.
     """
-    t  = ticker.upper()
-    cn = company_name.strip()
-    print(f"[transcript] Attempting Motley Fool scrape for {t}")
+    t = ticker.upper()
+    print(f"[transcript] Attempting SEC EDGAR 8-K fetch for {t}")
 
-    # ── Approach 1: Motley Fool listing pages ─────────────────────────────────
-    article_urls = _collect_mf_urls(t, cn)
+    cik     = get_cik(t)
+    cik_int = int(cik)
+    print(f"[transcript] Resolved CIK: {cik_int}")
 
-    if not article_urls:
-        print("[transcript] First result URL found: no results found")
+    submissions = _fetch_submissions(cik)
+    candidates  = _candidate_8ks(submissions)
+    print(
+        f"[transcript] Found {len(candidates)} candidate 8-K filings "
+        f"with Items 2.02/7.01"
+    )
 
-        # ── Approach 2: Google search ─────────────────────────────────────────
-        print(f"[transcript] Attempting Google search scraping for {t}")
-        article_urls = _collect_google_urls(t, cn)
-
-    if not article_urls:
-        print("[transcript] First result URL found: no results found")
-        print(f"[transcript] FAILED — no transcript URLs found via Motley Fool or Google")
+    if not candidates:
         raise ValueError(
-            f"No transcript found for '{t}' via Motley Fool listing or Google search."
+            f"No 8-K filings with Items 2.02 or 7.01 found for '{t}' on SEC EDGAR."
         )
 
-    print(f"[transcript] First result URL found: {article_urls[0]}")
-
-    # ── Scrape each article ───────────────────────────────────────────────────
     transcripts = []
-    for url in article_urls:
-        result = _scrape_one(url)
-        if result:
-            transcripts.append(result)
+    for accession, filing_date in candidates:
+        if len(transcripts) >= MAX_TRANSCRIPTS:
+            break
+
+        exhibit_url = _find_exhibit_url(cik_int, accession)
+        if not exhibit_url:
+            print(f"[transcript] No suitable exhibit found in {accession} — skipping")
+            continue
+
+        print(f"[transcript] Search URL being fetched: {exhibit_url}")
+        text = _fetch_exhibit_text(exhibit_url)
+        if not text:
+            continue
+
+        quarter, year = _parse_quarter_year(text, filing_date)
+        transcripts.append({
+            "quarter": quarter,
+            "year":    year,
+            "url":     exhibit_url,
+            "content": text,
+        })
 
     print(f"[transcript] Found {len(transcripts)} transcripts for {t}")
 
     if not transcripts:
-        print(f"[transcript] FAILED — all article scrapes returned empty")
-        raise ValueError(f"All transcript articles for '{t}' failed to parse.")
+        print(f"[transcript] FAILED — all exhibit fetches returned empty")
+        raise ValueError(
+            f"All 8-K transcript exhibits for '{t}' failed to parse or "
+            f"contained no text."
+        )
 
-    # Sort newest first (year desc, quarter desc); put None-dated entries last
+    # Sort newest first (year desc, quarter desc; None-dated entries last)
     transcripts.sort(
         key=lambda x: (x["year"] or 0, x["quarter"] or 0), reverse=True
     )
 
-    # Combine content with section headers so Claude can orient itself
     combined = "\n\n".join(
-        f"--- Q{t['quarter']} {t['year']} Earnings Call ---\n{t['content']}"
-        for t in transcripts
+        f"--- Q{tr['quarter']} {tr['year']} Earnings Call ---\n{tr['content']}"
+        for tr in transcripts
     )
 
     latest = transcripts[0]
