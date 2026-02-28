@@ -31,11 +31,11 @@ def get_cik(ticker: str) -> str:
     raise ValueError(f"Ticker '{ticker}' not found in SEC EDGAR company tickers.")
 
 
-def get_latest_10k(cik: str) -> tuple[str, str, str]:
+def _get_recent_10ks(cik: str, n: int = 3) -> list:
     """
-    Fetch the submissions JSON for a company and return the
-    (accession_number, primary_document_filename, filing_date) for the
-    most recent 10-K filing.
+    Fetch the submissions JSON for a company and return up to n
+    (accession_number, primary_document_filename, filing_date) tuples
+    for the most recent 10-K filings, newest first.
     """
     url = f"{EDGAR_DATA_URL}/submissions/CIK{cik}.json"
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -48,11 +48,16 @@ def get_latest_10k(cik: str) -> tuple[str, str, str]:
     primary_docs = recent["primaryDocument"]
     dates = recent["filingDate"]
 
+    results = []
     for i, form in enumerate(forms):
         if form == "10-K":
-            return accessions[i], primary_docs[i], dates[i]
+            results.append((accessions[i], primary_docs[i], dates[i]))
+            if len(results) >= n:
+                break
 
-    raise ValueError(f"No 10-K filing found for CIK {cik}.")
+    if not results:
+        raise ValueError(f"No 10-K filing found for CIK {cik}.")
+    return results
 
 
 def fetch_document_text(cik: str, accession_number: str, primary_doc: str) -> str:
@@ -107,15 +112,27 @@ def fetch_10k_sections(ticker: str) -> dict:
     """
     Main entry point.  Returns a dict with keys:
       - ticker
-      - filing_date
+      - filing_date      (most recent 10-K)
       - cik
-      - accession_number
-      - risk_factors   (Item 1A text, up to 15 000 chars)
-      - mda            (Item 7 text, up to 15 000 chars)
+      - accession_number (most recent 10-K)
+      - risk_factors     (Item 1A text, up to 15 000 chars)
+      - mda              (Item 7 text, up to 15 000 chars)
+      - filing_urls      list of {year, url} for up to 3 recent 10-Ks
     """
     cik = get_cik(ticker)
-    accession_number, primary_doc, filing_date = get_latest_10k(cik)
+    filings = _get_recent_10ks(cik, n=3)
+    accession_number, primary_doc, filing_date = filings[0]  # most recent
     text = fetch_document_text(cik, accession_number, primary_doc)
+
+    # Build direct EDGAR archive URLs for each filing
+    cik_int = int(cik)
+    filing_urls = []
+    for acc, doc, date in filings:
+        acc_clean = acc.replace("-", "")
+        filing_urls.append({
+            "year": int(date[:4]),
+            "url": f"{EDGAR_ARCHIVE_URL}/{cik_int}/{acc_clean}/{doc}",
+        })
 
     # Item 1A — Risk Factors (ends at Item 1B or Item 2)
     risk_factors = extract_section(
@@ -140,4 +157,5 @@ def fetch_10k_sections(ticker: str) -> dict:
         "accession_number": accession_number,
         "risk_factors": risk_factors,
         "mda": mda,
+        "filing_urls": filing_urls,
     }

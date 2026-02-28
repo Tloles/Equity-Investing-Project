@@ -69,6 +69,37 @@ function renderPriceWidget(data) {
   `;
 }
 
+/* ── Render: source document links ── */
+function renderSourceDocs(data) {
+  const el = document.getElementById('source-docs');
+
+  const hasFilings    = data.filing_urls && data.filing_urls.length > 0;
+  const hasTranscript = data.transcript_available && data.transcript_url;
+
+  if (!hasFilings && !hasTranscript) {
+    hide(el);
+    return;
+  }
+
+  let html = '';
+
+  if (hasFilings) {
+    const links = data.filing_urls.map(f =>
+      `<a class="source-link" href="${f.url}" target="_blank" rel="noopener noreferrer">FY${f.year} 10-K &#8599;</a>`
+    ).join('');
+    html += `<div class="source-group"><span class="source-label">10-K Filings</span>${links}</div>`;
+  }
+
+  if (hasTranscript) {
+    const label = `Q${data.transcript_quarter} ${data.transcript_year}`;
+    html += `<div class="source-group"><span class="source-label">Earnings Transcripts</span>` +
+      `<a class="source-link" href="${data.transcript_url}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} &#8599;</a></div>`;
+  }
+
+  el.innerHTML = html;
+  show(el);
+}
+
 /* ── Render: analysis tab lists ── */
 function renderList(listEl, items) {
   listEl.innerHTML = items.map((text, i) => `

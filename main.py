@@ -66,6 +66,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # ── Response schemas ───────────────────────────────────────────────────────────
 
 
+class FilingLink(BaseModel):
+    year: int
+    url: str
+
+
 class YearData(BaseModel):
     """One fiscal year of actuals (income statement + cash flow + balance sheet)."""
     year: int
@@ -131,6 +136,10 @@ class AnalysisResponse(BaseModel):
     # Sector / industry classification (best-effort — None if profile unavailable)
     sector: Optional[str] = None
     industry: Optional[str] = None
+
+    # Source document links
+    filing_urls: List[FilingLink] = []
+    transcript_url: Optional[str] = None
 
     # Price widget / DCF (best-effort — None if FMP data unavailable)
     dcf_available: bool
@@ -401,10 +410,12 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         cik=tenk_data["cik"],
         sector=sector_info.sector if sector_info else None,
         industry=sector_info.industry if sector_info else None,
+        filing_urls=[FilingLink(**f) for f in tenk_data.get("filing_urls", [])],
         transcript_available=transcript_available,
         transcript_date=transcript_data["date"] if transcript_data else None,
         transcript_quarter=transcript_data["quarter"] if transcript_data else None,
         transcript_year=transcript_data["year"] if transcript_data else None,
+        transcript_url=transcript_data.get("url") if transcript_data else None,
         dcf_available=dcf_available,
         current_price=dcf_data.current_price if dcf_data else None,
         intrinsic_value=dcf_data.intrinsic_value if dcf_data else None,

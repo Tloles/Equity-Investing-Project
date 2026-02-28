@@ -55,6 +55,7 @@ form.addEventListener('submit', async e => {
     const data = await fetchAnalysis(ticker);
 
     renderMeta(data);
+    renderSourceDocs(data);
     renderPriceWidget(data);
     renderList(document.getElementById('bull-list'),  data.bull_case);
     renderList(document.getElementById('bear-list'),  data.bear_case);

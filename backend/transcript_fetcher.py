@@ -58,4 +58,6 @@ def fetch_latest_transcript(ticker: str) -> dict:
         "year": latest.get("year"),
         "date": latest.get("date", ""),
         "content": latest.get("content", ""),
+        # FMP does not consistently expose a source URL; may be None.
+        "url": latest.get("url") or None,
     }
