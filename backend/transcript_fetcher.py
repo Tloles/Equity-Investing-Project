@@ -7,9 +7,9 @@ Requires FMP_API_KEY in the environment (loaded from .env).
 
 import os
 import requests
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 

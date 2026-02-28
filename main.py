@@ -5,16 +5,20 @@ Wires together:
   - backend.sec_fetcher        (SEC EDGAR 10-K — no API key)
   - backend.transcript_fetcher (FMP earnings call transcript)
   - backend.analyzer           (Claude bull/bear analysis)
+  - backend.dcf                (DCF intrinsic value)
 
 Run with:
     uvicorn main:app --reload
 """
 
 import asyncio
+import os
 from typing import List, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException
+from dotenv import find_dotenv, load_dotenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +28,17 @@ from backend.industry_classifier import fetch_sector_info
 from backend.industry_config import get_sector_rules
 from backend.sec_fetcher import fetch_10k_sections
 from backend.transcript_fetcher import fetch_latest_transcript
+
+load_dotenv(find_dotenv())
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+
+STATIC_DIR      = "frontend"
+EDGAR_DATA_URL  = "https://data.sec.gov"
+FRED_URL        = "https://fred.stlouisfed.org"
+HTTP_USER_AGENT = "equity-research-tool research@equityresearch.com"
+
+# ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Equity Analysis API",
@@ -35,9 +50,18 @@ app = FastAPI(
 )
 
 
-# ---------------------------------------------------------------------------
-# Response schemas
-# ---------------------------------------------------------------------------
+# ── Exception handlers ─────────────────────────────────────────────────────────
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+    )
+
+
+# ── Response schemas ───────────────────────────────────────────────────────────
 
 
 class DCFModel(BaseModel):
@@ -89,21 +113,45 @@ class AnalysisResponse(BaseModel):
     dcf_warning: Optional[str] = None
 
     # Claude analysis
-    bull_case: list[str]
-    bear_case: list[str]
-    downplayed_risks: list[str]
+    bull_case: list
+    bear_case: list
+    downplayed_risks: list
     analyst_summary: str
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 
 @app.get("/health", tags=["meta"])
-async def health():
-    """Liveness check."""
-    return {"status": "ok"}
+async def health() -> dict:
+    """Returns liveness and data-source reachability status."""
+    checks: dict = {}
+
+    # FMP — key presence only (avoids consuming API quota)
+    checks["fmp"] = "ok" if os.getenv("FMP_API_KEY") else "missing_api_key"
+
+    # FRED — lightweight connectivity check
+    try:
+        r = await asyncio.to_thread(
+            requests.head, FRED_URL,
+            timeout=5, headers={"User-Agent": HTTP_USER_AGENT},
+        )
+        checks["fred"] = "ok" if r.status_code < 500 else f"http_{r.status_code}"
+    except Exception as exc:
+        checks["fred"] = f"unreachable ({type(exc).__name__})"
+
+    # SEC EDGAR — lightweight connectivity check
+    try:
+        r = await asyncio.to_thread(
+            requests.head, EDGAR_DATA_URL,
+            timeout=5, headers={"User-Agent": HTTP_USER_AGENT},
+        )
+        checks["sec"] = "ok" if r.status_code < 500 else f"http_{r.status_code}"
+    except Exception as exc:
+        checks["sec"] = f"unreachable ({type(exc).__name__})"
+
+    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    return {"status": overall, "sources": checks}
 
 
 @app.get(
@@ -112,7 +160,7 @@ async def health():
     tags=["analysis"],
     summary="Full bull/bear analysis for a ticker",
 )
-async def analyze_ticker(ticker: str):
+async def analyze_ticker(ticker: str) -> AnalysisResponse:
     """
     1. Fetch the latest 10-K MD&A + Risk Factors from SEC EDGAR.
     2. Fetch the latest earnings call transcript from FMP (best-effort).
@@ -164,7 +212,9 @@ async def analyze_ticker(ticker: str):
 
     # Transcript is optional — degrade gracefully if missing or errored
     transcript_available = not isinstance(transcript_result, Exception)
-    transcript_data: Optional[dict] = transcript_result if transcript_available else None  # type: ignore[assignment]
+    transcript_data: Optional[dict] = (
+        transcript_result if transcript_available else None  # type: ignore[assignment]
+    )
 
     # DCF is optional — degrade gracefully if FMP data is unavailable
     if isinstance(dcf_result, Exception):
@@ -172,13 +222,15 @@ async def analyze_ticker(ticker: str):
         dcf_available = False
         dcf_data = None
     else:
-        print(f"[main] DCF succeeded — intrinsic_value={dcf_result.intrinsic_value}, "  # type: ignore[union-attr]
-              f"current_price={dcf_result.current_price}")  # type: ignore[union-attr]
+        print(
+            f"[main] DCF succeeded — intrinsic_value={dcf_result.intrinsic_value}, "  # type: ignore[union-attr]
+            f"current_price={dcf_result.current_price}"  # type: ignore[union-attr]
+        )
         dcf_available = True
         dcf_data = dcf_result  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
-    # Step 4: build combined text inputs and run Claude analysis
+    # Phase 2: build combined text inputs and run Claude analysis
     # ------------------------------------------------------------------
     tenk_text = "\n\n".join(
         filter(None, [tenk_data.get("mda"), tenk_data.get("risk_factors")])
@@ -197,7 +249,7 @@ async def analyze_ticker(ticker: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
     # ------------------------------------------------------------------
-    # Step 5: assemble and return response
+    # Phase 3: assemble and return response
     # ------------------------------------------------------------------
     return AnalysisResponse(
         ticker=result.ticker,
@@ -240,8 +292,6 @@ async def analyze_ticker(ticker: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# Static frontend — must be mounted AFTER all API routes so the API takes
-# precedence over the catch-all static file handler.
-# ---------------------------------------------------------------------------
-app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+# ── Static frontend — mounted last so API routes take precedence ───────────────
+
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="frontend")

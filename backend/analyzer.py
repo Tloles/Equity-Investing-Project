@@ -10,9 +10,9 @@ import json
 from dataclasses import dataclass
 
 import anthropic
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 MODEL = "claude-sonnet-4-6"
 

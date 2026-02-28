@@ -10,25 +10,19 @@ Both functions cache their result for 24 hours and fall back to the
 hardcoded defaults in config.py on any network / parse failure.
 """
 
-import time
 from typing import Tuple
 
 import requests
 from bs4 import BeautifulSoup
+from dotenv import find_dotenv, load_dotenv
 
+from .cache import TTLCache
 from .config import FALLBACK_ERP, FALLBACK_RISK_FREE_RATE
 
+load_dotenv(find_dotenv())
+
 _CACHE_TTL = 86_400   # 24 hours in seconds
-_cache: dict = {}
-
-
-def _is_fresh(key: str) -> bool:
-    entry = _cache.get(key)
-    return entry is not None and (time.time() - entry["ts"]) < _CACHE_TTL
-
-
-def _store(key: str, value: float, source: str) -> None:
-    _cache[key] = {"value": value, "source": source, "ts": time.time()}
+_cache = TTLCache(default_ttl=_CACHE_TTL)
 
 
 # ── 10-Year Treasury yield (FRED) ─────────────────────────────────────────────
@@ -41,10 +35,11 @@ def get_risk_free_rate() -> Tuple[float, str]:
     24 hours; falls back to FALLBACK_RISK_FREE_RATE from config on any error.
     """
     key = "risk_free_rate"
-    if _is_fresh(key):
-        e = _cache[key]
-        print(f"[market_data] risk_free_rate cache hit: {e['value']:.4f} ({e['source']})")
-        return e["value"], e["source"]
+    cached = _cache.get_with_source(key)
+    if cached is not None:
+        value, source = cached
+        print(f"[market_data] risk_free_rate cache hit: {value:.4f} ({source})")
+        return value, source
 
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
@@ -67,7 +62,7 @@ def get_risk_free_rate() -> Tuple[float, str]:
             raise ValueError("No valid DGS10 observation found in FRED response")
 
         source = "FRED DGS10 (live)"
-        _store(key, value, source)
+        _cache.set_with_source(key, value, source)
         print(f"[market_data] risk_free_rate fetched: {value:.4f} ({source})")
         return value, source
 
@@ -87,10 +82,11 @@ def get_equity_risk_premium() -> Tuple[float, str]:
     Result is cached for 24 hours; falls back to FALLBACK_ERP on any error.
     """
     key = "equity_risk_premium"
-    if _is_fresh(key):
-        e = _cache[key]
-        print(f"[market_data] equity_risk_premium cache hit: {e['value']:.4f} ({e['source']})")
-        return e["value"], e["source"]
+    cached = _cache.get_with_source(key)
+    if cached is not None:
+        value, source = cached
+        print(f"[market_data] equity_risk_premium cache hit: {value:.4f} ({source})")
+        return value, source
 
     try:
         url = (
@@ -123,7 +119,7 @@ def get_equity_risk_premium() -> Tuple[float, str]:
 
         value = candidates[-1]   # most recent entry is last in the table
         source = "Damodaran implied ERP (live)"
-        _store(key, value, source)
+        _cache.set_with_source(key, value, source)
         print(f"[market_data] equity_risk_premium fetched: {value:.4f} ({source})")
         return value, source
 
