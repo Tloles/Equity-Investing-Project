@@ -498,7 +498,9 @@ main {
 
 .dcf-proj-table {
   width: 100%;
-  border-collapse: collapse;
+  /* separate (not collapse) is required for position:sticky on cells to work */
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: .82rem;
   min-width: 960px;
 }
@@ -506,7 +508,7 @@ main {
 .dcf-proj-table thead tr { background: #f8fafc; }
 
 .dcf-proj-table th {
-  padding: 10px 16px;
+  padding: 10px 12px;
   text-align: right;
   font-size: .67rem;
   font-weight: 700;
@@ -515,21 +517,43 @@ main {
   color: var(--muted);
   border-bottom: 2px solid var(--border);
   white-space: nowrap;
+  width: 88px;
+  min-width: 80px;
 }
-.dcf-proj-table th.col-label { text-align: left; min-width: 158px; }
+
+/* Sticky label header */
+.dcf-proj-table th.col-label {
+  text-align: left;
+  width: 190px;
+  min-width: 190px;
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #f8fafc;
+  box-shadow: 2px 0 4px -2px rgba(0,0,0,.08);
+}
 .dcf-proj-table th.col-actual { background: #f1f5f9; color: #94a3b8; }
 
 /* Body cells */
 .dcf-proj-table td {
-  padding: 7px 16px;
+  padding: 7px 12px;
   text-align: right;
   border-bottom: 1px solid #f1f5f9;
   color: #334155;
 }
+
+/* Sticky label body cell */
 .dcf-proj-table td:first-child {
   text-align: left;
   color: var(--text);
   font-size: .8rem;
+  width: 190px;
+  min-width: 190px;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: 2px 0 4px -2px rgba(0,0,0,.08);
 }
 .dcf-proj-table td.col-actual {
   background: #f8fafc;
@@ -547,6 +571,7 @@ main {
   padding: 6px 16px;
   border-bottom: 1px solid var(--border);
 }
+.dcf-proj-table tr.section-header td:first-child { background: #e8edf5; }
 
 /* Bold data rows */
 .dcf-proj-table tr.row-bold td { font-weight: 600; }
@@ -558,6 +583,7 @@ main {
   border-top: 1.5px solid var(--border);
 }
 .dcf-proj-table tr.row-highlight td.col-actual { background: #f1f5f9; }
+.dcf-proj-table tr.row-highlight td:first-child { background: #f8fafc; }
 
 /* Italic % driver rows */
 .dcf-proj-table tr.row-italic td {
@@ -568,7 +594,11 @@ main {
   padding-bottom: 6px;
   border-bottom: 1px solid transparent;
 }
-.dcf-proj-table tr.row-italic td:first-child { padding-left: 26px; }
+.dcf-proj-table tr.row-italic td:first-child {
+  padding-left: 26px;
+  background: var(--surface);  /* keep sticky cell opaque */
+  color: var(--muted);
+}
 
 /* Cost rows (CoR, OpEx, Tax) */
 .dcf-proj-table tr.row-cost td { color: #64748b; }
@@ -581,10 +611,12 @@ main {
   font-weight: 700;
   border-top: 2px solid var(--border);
 }
+.dcf-proj-table tr.row-fcf td:first-child { background: #f0f4ff; }
 .dcf-proj-table tr.row-fcf-italic td {
   background: #f0f4ff;
   border-bottom: none;
 }
+.dcf-proj-table tr.row-fcf-italic td:first-child { background: #f0f4ff; }
 
 /* Editable italic cells */
 .dcf-proj-table td.cell-editable {

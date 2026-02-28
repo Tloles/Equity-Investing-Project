@@ -11,13 +11,6 @@ function fmtUSD(value) {
   return sign + '$' + abs.toFixed(0);
 }
 
-function fmtShares(value) {
-  const abs = Math.abs(value);
-  if (abs >= 1e9) return (value / 1e9).toFixed(2) + 'B';
-  if (abs >= 1e6) return (value / 1e6).toFixed(2) + 'M';
-  return value.toFixed(0);
-}
-
 function fmtPct(decimal) {
   return (decimal * 100).toFixed(1) + '%';
 }

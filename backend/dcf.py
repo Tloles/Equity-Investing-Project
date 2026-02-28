@@ -15,7 +15,7 @@ Requires FMP_API_KEY in the environment (loaded from .env).
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import requests
 from dotenv import find_dotenv, load_dotenv
