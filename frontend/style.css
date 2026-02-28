@@ -455,6 +455,27 @@ main {
   margin-top: 3px;
 }
 
+.proj-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-reset {
+  padding: 8px 18px;
+  background: transparent;
+  color: var(--muted);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-size: .82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.btn-reset:hover { color: var(--text); border-color: #94a3b8; background: #f8fafc; }
+
 .btn-recalc {
   padding: 8px 18px;
   background: var(--navy);
@@ -465,7 +486,6 @@ main {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  flex-shrink: 0;
   transition: background .15s, opacity .15s;
 }
 .btn-recalc:hover:not(:disabled) { background: #16304f; }
