@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.analyzer import analyze, analyze_industry
+from backend.analyzer import analyze, analyze_industry, apply_bear_case_fallback
 from backend.config import PROJECTION_YEARS
 from backend.dcf import fetch_dcf
 from backend.ddm import fetch_ddm
@@ -569,6 +569,9 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         industry_data = None
     else:
         industry_data = industry_result  # type: ignore[assignment]
+        # If Claude omitted headwinds, fall back to the bear_case items
+        if industry_data and not industry_data.headwinds:
+            apply_bear_case_fallback(industry_data, result.bear_case)
 
     # ------------------------------------------------------------------
     # Phase 3: assemble and return response

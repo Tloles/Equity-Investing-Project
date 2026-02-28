@@ -311,58 +311,72 @@ def _build_industry_prompt(
     tenk_snippet       = tenk_text[:12_000]       if tenk_text       else "(not available)"
     transcript_snippet = transcript_text[:8_000]   if transcript_text else "(not available)"
 
-    sector_line = f"Sector: {sector}\n\n" if sector else ""
+    sector_line = f"Sector: {sector}\n" if sector else ""
 
-    return f"""You are an experienced industry analyst. Analyze the following source
-materials for {ticker} and produce a rigorous industry analysis.
+    return f"""You must respond with ONLY a valid JSON object. Do not include any text before or after the JSON.
 
-{sector_line}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
+You are an experienced industry analyst. Using the source materials below for {ticker}, produce a structured industry analysis.
+{sector_line}
+--- 10-K EXCERPTS (MD&A + Risk Factors) ---
 {tenk_snippet}
 
 --- LATEST EARNINGS CALL TRANSCRIPT ---
 {transcript_snippet}
 
-Use the `provide_industry_analysis` tool. You MUST populate ALL 10 fields listed
-below — the tool call is invalid if any field is missing or empty.
+Your response must be a JSON object with EXACTLY these 10 keys. Every key is required — do not omit any of them.
 
-REQUIRED FIELDS (all 10 must be present):
-
-1. threat_of_new_entrants       — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
-2. bargaining_power_of_suppliers — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
-3. bargaining_power_of_buyers   — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
-4. threat_of_substitutes        — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
-5. competitive_rivalry          — object with "rating" (Low/Medium/High) and "explanation" (2-3 sentences)
-6. industry_structure           — a PLAIN STRING (not an object, not nested JSON) of 2-3 paragraphs
-                                   describing overall industry dynamics. Use "\\n\\n" between paragraphs.
-7. competitive_position         — a PLAIN STRING describing where {ticker} sits vs competitors,
-                                   its moats, and its key differentiators.
-8. key_kpis                     — array of 3-5 objects, each with exactly two string fields:
-                                     "metric"         (KPI name, e.g. "Net Revenue Retention")
-                                     "why_it_matters" (1-2 sentence explanation)
-9. tailwinds                    — array of EXACTLY 3 strings, each a macro/structural trend
-                                   benefiting the industry
-10. headwinds                   — array of EXACTLY 3 strings, each a macro/structural trend
-                                   threatening the industry
-
-EXAMPLE of the exact shape required (use real content, not these placeholders):
 {{
-  "threat_of_new_entrants":        {{"rating": "Low",    "explanation": "..."}},
-  "bargaining_power_of_suppliers": {{"rating": "Medium", "explanation": "..."}},
-  "bargaining_power_of_buyers":    {{"rating": "High",   "explanation": "..."}},
-  "threat_of_substitutes":         {{"rating": "Low",    "explanation": "..."}},
-  "competitive_rivalry":           {{"rating": "High",   "explanation": "..."}},
-  "industry_structure":   "Paragraph one.\\n\\nParagraph two.\\n\\nParagraph three.",
-  "competitive_position": "Single block of text describing competitive standing.",
+  "threat_of_new_entrants": {{
+    "rating": "Low",
+    "explanation": "2-3 sentences grounded in the source documents explaining why."
+  }},
+  "bargaining_power_of_suppliers": {{
+    "rating": "Medium",
+    "explanation": "2-3 sentences grounded in the source documents explaining why."
+  }},
+  "bargaining_power_of_buyers": {{
+    "rating": "High",
+    "explanation": "2-3 sentences grounded in the source documents explaining why."
+  }},
+  "threat_of_substitutes": {{
+    "rating": "Low",
+    "explanation": "2-3 sentences grounded in the source documents explaining why."
+  }},
+  "competitive_rivalry": {{
+    "rating": "High",
+    "explanation": "2-3 sentences grounded in the source documents explaining why."
+  }},
+  "industry_structure": "A single plain string — 2 to 3 paragraphs separated by two newlines — describing overall industry dynamics, market structure, and key competitive forces.",
+  "competitive_position": "A single plain string describing where {ticker} sits relative to competitors, its moats, and its key differentiators.",
   "key_kpis": [
-    {{"metric": "Annual Recurring Revenue", "why_it_matters": "..."}},
-    {{"metric": "Net Revenue Retention",    "why_it_matters": "..."}},
-    {{"metric": "Customer Acquisition Cost","why_it_matters": "..."}}
+    {{"metric": "Name of KPI 1", "why_it_matters": "1-2 sentences explaining why this metric is critical for this specific industry."}},
+    {{"metric": "Name of KPI 2", "why_it_matters": "1-2 sentences explaining why this metric is critical for this specific industry."}},
+    {{"metric": "Name of KPI 3", "why_it_matters": "1-2 sentences explaining why this metric is critical for this specific industry."}},
+    {{"metric": "Name of KPI 4", "why_it_matters": "1-2 sentences explaining why this metric is critical for this specific industry."}}
   ],
-  "tailwinds": ["Trend one.", "Trend two.", "Trend three."],
-  "headwinds": ["Risk one.",  "Risk two.",  "Risk three."]
+  "tailwinds": [
+    "First macro or structural trend benefiting the industry.",
+    "Second macro or structural trend benefiting the industry.",
+    "Third macro or structural trend benefiting the industry."
+  ],
+  "headwinds": [
+    "First macro or structural trend threatening the industry.",
+    "Second macro or structural trend threatening the industry.",
+    "Third macro or structural trend threatening the industry."
+  ]
 }}
 
-Ground every point in specific details from the source documents above."""
+Rules:
+- "rating" values must be exactly one of: Low, Medium, High
+- "industry_structure" and "competitive_position" must be plain strings, NOT objects or arrays
+- "key_kpis" must be an array of exactly 4 objects, each with "metric" and "why_it_matters" string fields
+- "tailwinds" must be an array of exactly 3 strings — you MUST include this key with 3 real string values:
+    "tailwinds": ["First macro trend benefiting the industry", "Second macro trend", "Third macro trend"]
+- "headwinds" must be an array of exactly 3 strings — you MUST include this key with 3 real string values:
+    "headwinds": ["First macro trend threatening the industry", "Second macro trend", "Third macro trend"]
+- Do NOT nest tailwinds or headwinds inside another object — they must be top-level keys
+- Ground every point in specific details from the source documents above
+- Replace all placeholder text with real analysis of {ticker}"""
 
 
 def analyze_industry(
@@ -548,9 +562,26 @@ def analyze_industry(
 
     headwinds = _pick(
         ["headwinds", "industry_headwinds", "macro_headwinds",
-         "risks", "negative_trends", "challenges"],
+         "challenges", "risks", "negative_trends", "threats",
+         "obstacles", "barriers", "risks_and_challenges"],
         default=[],
     )
+
+    parsed_kpis      = _parse_kpis(raw_kpis) if isinstance(raw_kpis, list) else []
+    parsed_tailwinds = [str(t) for t in tailwinds] if isinstance(tailwinds, list) else []
+    parsed_headwinds = [str(h) for h in headwinds] if isinstance(headwinds, list) else []
+
+    # ── Debug: confirm direction before mapping ────────────────────────────────
+    print(f"[industry] tailwinds (positive/growth trends) → {parsed_tailwinds}")
+    print(f"[industry] headwinds (negative/threat trends) → {parsed_headwinds}")
+
+    # ── Validation: log missing fields but fall back gracefully ───────────────
+    if not parsed_kpis:
+        print(f"[industry] WARNING: key_kpis missing or empty (got: {raw_kpis!r})")
+    if not parsed_tailwinds:
+        print(f"[industry] WARNING: tailwinds missing or empty (got: {tailwinds!r})")
+    if not parsed_headwinds:
+        print(f"[industry] WARNING: headwinds missing or empty (got: {headwinds!r})")
 
     return IndustryAnalysisResult(
         ticker=ticker.upper(),
@@ -561,7 +592,24 @@ def analyze_industry(
         competitive_rivalry=rivalry,
         industry_structure=industry_structure,
         competitive_position=competitive_position if isinstance(competitive_position, str) else str(competitive_position),
-        key_kpis=_parse_kpis(raw_kpis) if isinstance(raw_kpis, list) else [],
-        tailwinds=[str(t) for t in tailwinds] if isinstance(tailwinds, list) else [],
-        headwinds=[str(h) for h in headwinds] if isinstance(headwinds, list) else [],
+        key_kpis=parsed_kpis,
+        tailwinds=parsed_tailwinds,
+        headwinds=parsed_headwinds,
     )
+
+
+def apply_bear_case_fallback(
+    industry_result: "IndustryAnalysisResult",
+    bear_case: list,
+) -> None:
+    """
+    Patch headwinds in-place from bear_case if headwinds is empty after parsing.
+    Called from main.py after both Claude analyses complete, where bear_case
+    is available.
+    """
+    if not industry_result.headwinds and bear_case:
+        industry_result.headwinds = [str(item) for item in bear_case[:3]]
+        print(
+            f"[industry] headwinds fallback: populated {len(industry_result.headwinds)} "
+            f"items from bear_case"
+        )
