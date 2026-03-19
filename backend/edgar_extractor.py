@@ -413,10 +413,9 @@ def fetch_edgar_financials(ticker: str, years: int = 5) -> EdgarFinancials:
     """
     Fetch financial data from SEC EDGAR via edgartools.
 
-    Uses Company.get_financials() which parses the latest 10-K XBRL filing
-    and returns standardised income statement, balance sheet, and cash flow
-    DataFrames — typically 3 years per filing.  To get 5 years, we also
-    process the prior 10-K filing and merge the data.
+    Uses Financials.extract() on multiple 10-K filings (each gives ~3 years
+    of IS/CF data) and stitches them into a single 5-year time series.
+    Newer filings take precedence when years overlap.
 
     Returns EdgarFinancials with company metadata and per-year financial data
     (oldest → newest).
@@ -449,66 +448,82 @@ def fetch_edgar_financials(ticker: str, years: int = 5) -> EdgarFinancials:
 
     print(f"[EDGAR] Found company: {company_name} (CIK: {cik}, SIC: {sic_code})")
 
-    # Get financials from latest 10-K (gives ~3 years)
+    # ── Fetch multiple 10-K filings to get 5 years of data ────────────
+    # Each 10-K has ~3 years of IS/CF and ~2 years of BS.
+    # 3 filings → 5 unique fiscal years (with overlap).
+    # We process filings newest-first; the first filing to provide a given
+    # fiscal year wins (most recent data takes precedence).
     try:
-        financials = company.get_financials()
+        from edgar import Financials
+    except ImportError:
+        raise ImportError("edgartools >= 4.6 required for Financials.extract")
+
+    # Fetch enough filings: 3 filings covers 5 unique years
+    n_filings = 3 if years <= 5 else (years // 2 + 1)
+    try:
+        all_10k = company.get_filings(form="10-K").latest(n_filings)
     except Exception as exc:
-        raise ValueError(f"Could not get financials for {ticker}: {exc}")
+        raise ValueError(f"Could not get 10-K filings for {ticker}: {exc}")
 
-    # Extract DataFrames
-    try:
-        inc_df = financials.income_statement().to_dataframe()
-    except Exception:
-        inc_df = None
-    try:
-        bs_df = financials.balance_sheet().to_dataframe()
-    except Exception:
-        bs_df = None
-    try:
-        cf_df = financials.cashflow_statement().to_dataframe()
-    except Exception:
-        cf_df = None
+    # Accumulate concept maps across filings (newest filing first = priority)
+    inc_maps: Dict[str, Dict[str, float]] = {}  # date_col → concept map
+    bs_maps: Dict[str, Dict[str, float]] = {}
+    cf_maps: Dict[str, Dict[str, float]] = {}
 
-    if inc_df is None:
+    for i, filing in enumerate(all_10k):
+        try:
+            fin = Financials.extract(filing)
+        except Exception as exc:
+            print(f"[EDGAR] Filing {i} ({filing.period_of_report}) extract failed: {exc}")
+            continue
+
+        # Income statement
+        try:
+            inc_df = fin.income_statement().to_dataframe()
+            dcols = _get_date_cols(inc_df)
+            maps = _df_to_concept_maps(inc_df, dcols)
+            for dc, cmap in maps.items():
+                if dc not in inc_maps:  # newer filing takes precedence
+                    inc_maps[dc] = cmap
+        except Exception:
+            inc_df = None
+
+        # Balance sheet
+        try:
+            bs_df = fin.balance_sheet().to_dataframe()
+            dcols = _get_date_cols(bs_df)
+            maps = _df_to_concept_maps(bs_df, dcols)
+            for dc, cmap in maps.items():
+                if dc not in bs_maps:
+                    bs_maps[dc] = cmap
+        except Exception:
+            pass
+
+        # Cash flow statement
+        try:
+            cf_df = fin.cashflow_statement().to_dataframe()
+            dcols = _get_date_cols(cf_df)
+            maps = _df_to_concept_maps(cf_df, dcols)
+            for dc, cmap in maps.items():
+                if dc not in cf_maps:
+                    cf_maps[dc] = cmap
+        except Exception:
+            pass
+
+        period = str(filing.period_of_report or "")
+        print(f"[EDGAR] Filing {i} ({period}): "
+              f"IS={len(inc_maps)} dates, BS={len(bs_maps)}, CF={len(cf_maps)}")
+
+    if not inc_maps:
         raise ValueError(f"No income statement data available for {ticker}")
 
-    # Get date columns (e.g. ['2025-09-27', '2024-09-28', '2023-09-30'])
-    date_cols = _get_date_cols(inc_df)
-    print(f"[EDGAR] Date columns from latest 10-K: {date_cols}")
+    # ── Extract years from concept maps ─────────────────────────────────
+    # Use all date columns from income statement (superset)
+    all_date_cols = sorted(inc_maps.keys())
+    print(f"[EDGAR] All date columns across filings: {all_date_cols}")
 
-    # Build concept maps per date column for each statement
-    inc_maps = _df_to_concept_maps(inc_df, date_cols) if inc_df is not None else {}
-    bs_maps = _df_to_concept_maps(bs_df, date_cols) if bs_df is not None else {}
-    cf_maps = _df_to_concept_maps(cf_df, date_cols) if cf_df is not None else {}
-
-    # If we need more years, try the prior 10-K filing
-    if len(date_cols) < years:
-        try:
-            all_10k = company.get_filings(form="10-K").latest(3)
-            # The second filing (index 1) is the prior year's 10-K
-            for filing in all_10k:
-                prior_period = str(filing.period_of_report or "")
-                # Skip if it's the same as the latest
-                if prior_period and prior_period in date_cols:
-                    continue
-                # Skip the latest filing
-                if prior_period and prior_period[:4] == date_cols[0][:4]:
-                    continue
-
-                try:
-                    prior_xbrl = filing.xbrl()
-                    prior_income = prior_xbrl.get_statement_by_type("IncomeStatement")
-                    # get_statement_by_type returns a dict of category→Statement
-                    # Try the Financials get approach instead
-                except Exception:
-                    pass
-                break
-        except Exception as exc:
-            print(f"[EDGAR] Could not fetch prior 10-K for extra years: {exc}")
-
-    # Extract years from concept maps
     extracted_years: Dict[int, EdgarYear] = {}
-    for dcol in date_cols:
+    for dcol in all_date_cols:
         inc_map = inc_maps.get(dcol, {})
         bs_map = bs_maps.get(dcol, {})
         cf_map = cf_maps.get(dcol, {})
@@ -519,6 +534,12 @@ def fetch_edgar_financials(ticker: str, years: int = 5) -> EdgarFinancials:
             print(f"[EDGAR] FY{year_data.fiscal_year}: rev={year_data.revenue:.0f}  "
                   f"ni={year_data.net_income:.0f}  da={year_data.depreciation_amortization:.0f}  "
                   f"capex={year_data.capex:.0f}  fcf={year_data.fcf:.0f}")
+
+    # Keep only the most recent `years` fiscal years
+    all_fy = sorted(extracted_years.keys())
+    if len(all_fy) > years:
+        keep = all_fy[-years:]
+        extracted_years = {k: v for k, v in extracted_years.items() if k in keep}
 
     if len(extracted_years) < 2:
         raise ValueError(
