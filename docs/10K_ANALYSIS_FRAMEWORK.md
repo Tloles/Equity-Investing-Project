@@ -390,3 +390,34 @@ The following demonstrates how this framework applies to the CNX initiation repo
 **Earnings call:** Management's commentary on LNG export demand build as the 2027+ thesis anchor was extracted from the prepared remarks and used as a catalyst in the initiation report.
 
 **Valuation:** The 12.5x P/E target (vs. 18.3x current) reflected sector-wide multiple compression from commodity price uncertainty — the MD&A provided the context for why the spread between price and intrinsic value was narrow, supporting the Hold rather than Buy stance.
+
+---
+
+## Citation Rules for AI-Generated Analysis
+
+### Output Mapping (Section → Thesis Category)
+
+| Thesis Category | Primary Source | Secondary Source | Citation Tag |
+|----------------|---------------|-----------------|--------------|
+| Revenue growth drivers | Item 7 (MD&A) | Earnings Call (prepared remarks) | `[Item 7]` or `[Earnings Call]` |
+| Margin trends | Item 7 (MD&A) | Item 1 (Business) | `[Item 7]` |
+| Competitive risks | Item 1A (Risk Factors) | Item 1 (Business) | `[Item 1A]` |
+| Regulatory/legal risks | Item 1A (Risk Factors) | Item 7 (MD&A) | `[Item 1A]` |
+| Capital allocation | Item 7 (MD&A) | Earnings Call Q&A | `[Item 7]` or `[Q&A]` |
+| Management guidance | Earnings Call (prepared) | Item 7 (MD&A) | `[Earnings Call]` |
+| Industry dynamics | Item 1 (Business) | Item 1A (Risk Factors) | `[Item 1]` |
+| Macro/FX exposure | Item 1A + Item 7A | Earnings Call | `[Item 1A]` |
+
+### Citation Format Rules
+
+- **Every bull/bear detail paragraph MUST contain at least one bracketed citation tag**
+- Allowed tags: `[Item 1]`, `[Item 1A]`, `[Item 7]`, `[Item 7A]`, `[Earnings Call]`, `[Q&A]`, `[News]`
+- Multiple citations per point are encouraged when evidence spans sources
+- If no source material is available for a claim, prefix with `[Analyst Estimate]`
+
+### Quality Criteria for Thesis Points
+
+- Each bull/bear point must reference a specific fact, figure, or quote from source material
+- Downplayed risks must cite the specific Item 1A language being contrasted with reality
+- Porter's Five Forces explanations must cite specific competitive dynamics from Item 1 or Item 1A
+- Recent catalysts drawn from news should use `[News]` tag

@@ -6,6 +6,7 @@ Requires ANTHROPIC_API_KEY in the environment (loaded from .env).
 """
 
 import os
+import pathlib
 from dataclasses import dataclass
 from typing import Optional
 
@@ -15,6 +16,11 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv())
 
 MODEL = "claude-sonnet-4-6"
+
+_FRAMEWORK_PATH = pathlib.Path(__file__).resolve().parent.parent / "docs" / "10K_ANALYSIS_FRAMEWORK.md"
+_FRAMEWORK_TEXT = ""
+if _FRAMEWORK_PATH.exists():
+    _FRAMEWORK_TEXT = _FRAMEWORK_PATH.read_text()
 
 # Tool schema used to force structured JSON output from Claude
 _ANALYSIS_TOOL = {
@@ -82,7 +88,11 @@ _ANALYSIS_TOOL = {
                         },
                         "detail": {
                             "type": "string",
-                            "description": "Full evidence-backed explanation (2-4 sentences).",
+                            "description": (
+                                "Full evidence-backed explanation (2-4 sentences). "
+                                "MUST include bracketed citation tags like [Item 7], "
+                                "[Item 1A], [Earnings Call]."
+                            ),
                         },
                     },
                     "required": ["headline", "detail"],
@@ -103,7 +113,11 @@ _ANALYSIS_TOOL = {
                         },
                         "detail": {
                             "type": "string",
-                            "description": "Full evidence-backed explanation (2-4 sentences).",
+                            "description": (
+                                "Full evidence-backed explanation (2-4 sentences). "
+                                "MUST include bracketed citation tags like [Item 7], "
+                                "[Item 1A], [Earnings Call]."
+                            ),
                         },
                     },
                     "required": ["headline", "detail"],
@@ -118,7 +132,8 @@ _ANALYSIS_TOOL = {
                 "items": {"type": "string"},
                 "description": (
                     "Key risks or challenges that management appears to be "
-                    "understating, glossing over, or omitting in their communications."
+                    "understating, glossing over, or omitting in their communications. "
+                    "Include the citation tag for the relevant 10-K section, e.g. [Item 1A]."
                 ),
             },
             "recent_catalysts": {
@@ -228,10 +243,17 @@ Sector-specific analyst focus areas:
 
 """
 
+    framework_block = ""
+    if _FRAMEWORK_TEXT:
+        framework_block = f"""--- 10-K ANALYSIS FRAMEWORK ---
+{_FRAMEWORK_TEXT}
+
+"""
+
     return f"""You are an experienced equity research analyst. Analyze the following
 source materials for {ticker} and produce a rigorous investment analysis.
 
-{sector_block}{news_block}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
+{framework_block}{sector_block}{news_block}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
 {tenk_snippet}
 
 --- LATEST EARNINGS CALL TRANSCRIPT ---
@@ -256,7 +278,9 @@ Based on ALL the materials above (10-K, transcript, news, and social media), use
    developments, and market sentiment into an objective investment perspective
 10. Select the indices of the 5 most relevant news headlines from the numbered list provided.
 
-Ground bull/bear points in specific details from the 10-K and transcript.
+CITATION REQUIREMENT: Every bull/bear detail paragraph MUST include at least
+one bracketed citation tag (e.g., [Item 7], [Item 1A], [Earnings Call], [Q&A]).
+Follow the output mapping in the 10-K Analysis Framework above.
 Ground catalysts and sentiment in the news headlines and social posts.
 If news or social data is not available, focus on the fundamental analysis."""
 
@@ -388,7 +412,8 @@ def _porter_force_schema(name: str) -> dict:
                 "type": "string",
                 "description": (
                     f"2-3 sentences explaining the {name} rating, "
-                    "grounded in specific evidence from the source documents."
+                    "grounded in specific evidence from the source documents. "
+                    "MUST include bracketed citation tags like [Item 1], [Item 1A], [Item 7]."
                 ),
             },
         },
@@ -504,10 +529,17 @@ def _build_industry_prompt(
 
     sector_line = f"Sector: {sector}\n\n" if sector else ""
 
+    framework_block = ""
+    if _FRAMEWORK_TEXT:
+        framework_block = f"""--- 10-K ANALYSIS FRAMEWORK ---
+{_FRAMEWORK_TEXT}
+
+"""
+
     return f"""You are an experienced industry analyst. Analyze the following source
 materials for {ticker} and produce a rigorous industry analysis.
 
-{sector_line}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
+{framework_block}{sector_line}--- 10-K EXCERPTS (MD&A + Risk Factors) ---
 {tenk_snippet}
 
 --- LATEST EARNINGS CALL TRANSCRIPT ---
@@ -553,7 +585,9 @@ EXAMPLE of the exact shape required (use real content, not these placeholders):
   "headwinds": ["Risk one.",  "Risk two.",  "Risk three."]
 }}
 
-Ground every point in specific details from the source documents above."""
+CITATION REQUIREMENT: Every explanation MUST include at least one bracketed
+citation tag (e.g., [Item 1], [Item 1A], [Item 7], [Earnings Call]).
+Follow the output mapping in the 10-K Analysis Framework above."""
 
 
 def analyze_industry(
