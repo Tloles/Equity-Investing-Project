@@ -140,6 +140,16 @@ _ANALYSIS_TOOL = {
                     "If no news or social data is available, return an empty string."
                 ),
             },
+            "top_news_indices": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "Indices (0-based) of the 5 most relevant news headlines from the "
+                    "provided news data, ranked by importance to the investment thesis. "
+                    "These should be the headlines most useful for an investor evaluating "
+                    "this stock right now."
+                ),
+            },
             "analyst_summary": {
                 "type": "string",
                 "description": (
@@ -153,7 +163,7 @@ _ANALYSIS_TOOL = {
         "required": [
             "overall_rating", "thesis_statement", "key_metrics",
             "bull_case", "bear_case", "downplayed_risks",
-            "recent_catalysts", "sentiment_summary", "analyst_summary",
+            "recent_catalysts", "sentiment_summary", "top_news_indices", "analyst_summary",
         ],
     },
 }
@@ -170,6 +180,7 @@ class AnalysisResult:
     downplayed_risks: list[str]
     recent_catalysts: list[str]
     sentiment_summary: str
+    top_news_indices: list
     analyst_summary: str
 
     def to_dict(self) -> dict:
@@ -183,6 +194,7 @@ class AnalysisResult:
             "downplayed_risks": self.downplayed_risks,
             "recent_catalysts": self.recent_catalysts,
             "sentiment_summary": self.sentiment_summary,
+            "top_news_indices": self.top_news_indices,
             "analyst_summary": self.analyst_summary,
         }
 
@@ -242,6 +254,7 @@ Based on ALL the materials above (10-K, transcript, news, and social media), use
    around the stock (leave empty if no news data was provided)
 9. A balanced analyst summary paragraph that synthesizes fundamentals, recent
    developments, and market sentiment into an objective investment perspective
+10. Select the indices of the 5 most relevant news headlines from the numbered list provided.
 
 Ground bull/bear points in specific details from the 10-K and transcript.
 Ground catalysts and sentiment in the news headlines and social posts.
@@ -354,6 +367,7 @@ def analyze(
         downplayed_risks=data.get("downplayed_risks") or [],
         recent_catalysts=data.get("recent_catalysts") or [],
         sentiment_summary=data.get("sentiment_summary") or "",
+        top_news_indices=data.get("top_news_indices") or [],
         analyst_summary=data.get("analyst_summary") or "",
     )
 

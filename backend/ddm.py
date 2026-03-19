@@ -1,6 +1,7 @@
 """
-DDM calculator — fetches dividend history from FMP and computes both a
-Gordon Growth Model (single-stage) and a Two-Stage DDM intrinsic value.
+DDM calculator — accepts pre-fetched EDGAR financial data and Alpaca quote,
+then computes both a Gordon Growth Model (single-stage) and a Two-Stage DDM
+intrinsic value.
 
 Valuation approaches
 --------------------
@@ -14,23 +15,17 @@ Valuation approaches
     Stage 2 (terminal):     Gordon Growth terminal value at year N,
                             discounted back to present
 
-Requires FMP_API_KEY in the environment (loaded from .env).
+Data sources: SEC EDGAR (via EdgarFinancials) + Alpaca (via AlpacaQuote).
 """
 
-import os
 from dataclasses import dataclass
 from typing import List, Optional
 
-import requests
-from dotenv import find_dotenv, load_dotenv
-
+from .alpaca_client import AlpacaQuote
 from .config import ACTUALS_YEARS, DEFAULT_BETA
-from .industry_classifier import SectorInfo
+from .edgar_extractor import EdgarFinancials
+from .industry_profiles import IndustryProfile
 from .market_data import get_equity_risk_premium, get_risk_free_rate
-
-load_dotenv(find_dotenv(), override=True)
-
-FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
 
 # ── Data containers ───────────────────────────────────────────────────────────
@@ -83,25 +78,6 @@ class DDMResult:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_api_key() -> str:
-    key = os.getenv("FMP_API_KEY")
-    if not key:
-        raise EnvironmentError("FMP_API_KEY is not set. Add it to your .env file.")
-    return key
-
-
-def _fetch(endpoint: str, api_key: str, **params) -> list:
-    """GET a FMP stable endpoint and return the parsed JSON list."""
-    params["apikey"] = api_key
-    url = f"{FMP_BASE_URL}/{endpoint}"
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data:
-        raise ValueError(f"FMP returned empty data for: {endpoint}")
-    return data
-
-
 def _weighted_growth(rates: List[float]) -> float:
     """Recency-weighted average (newest first in input list)."""
     if not rates:
@@ -148,149 +124,108 @@ def _compute_two_stage(
     return pv_stage1, pv_terminal, pv_stage1 + pv_terminal
 
 
+def _empty_result(ticker: str, current_price: float, risk_free_rate: float,
+                  equity_risk_premium: float, beta: float,
+                  cost_of_equity: float) -> DDMResult:
+    """Return a minimal DDMResult for non-dividend-paying companies."""
+    return DDMResult(
+        ticker=ticker,
+        current_price=round(current_price, 2),
+        pays_dividends=False,
+        risk_free_rate=round(risk_free_rate, 4),
+        equity_risk_premium=round(equity_risk_premium, 4),
+        beta=round(beta, 4),
+        cost_of_equity=round(cost_of_equity, 4),
+        history=[],
+        latest_annual_dps=0.0,
+        avg_dps_growth=0.0,
+        weighted_dps_growth=0.0,
+        avg_payout_ratio=0.0,
+        current_yield=0.0,
+        ggm_growth_rate=0.0,
+        ggm_d1=0.0,
+        ggm_intrinsic_value=0.0,
+        ggm_upside_downside=0.0,
+        ts_high_growth_rate=0.0,
+        ts_high_growth_years=5,
+        ts_terminal_growth_rate=0.0,
+        ts_intrinsic_value=0.0,
+        ts_pv_stage1=0.0,
+        ts_pv_terminal=0.0,
+        ts_upside_downside=0.0,
+    )
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def fetch_ddm(ticker: str, sector_info: Optional[SectorInfo] = None) -> DDMResult:
+def fetch_ddm(
+    ticker: str,
+    edgar_data: EdgarFinancials,
+    quote: AlpacaQuote,
+    profile: IndustryProfile,
+) -> DDMResult:
     """
-    Fetch FMP dividend and financial data, then compute Gordon Growth
-    and Two-Stage DDM intrinsic values.
+    Compute Gordon Growth and Two-Stage DDM intrinsic values from
+    EDGAR financial data.
+
+    Parameters
+    ----------
+    ticker      : Stock ticker symbol.
+    edgar_data  : Pre-fetched EDGAR financial data (5 years, oldest→newest).
+    quote       : Live price and beta from Alpaca.
+    profile     : Industry profile with sector-specific rules.
 
     Returns
     -------
     DDMResult with dividend history, both model valuations, and base
     assumptions.
-
-    Raises
-    ------
-    EnvironmentError  if FMP_API_KEY is not set.
-    ValueError        if required data is missing.
     """
-    api_key = _get_api_key()
     ticker = ticker.upper()
 
-    # ── Step 1: fetch data ────────────────────────────────────────────────────
-    quotes = _fetch("quote", api_key, symbol=ticker)
-    quote = quotes[0]
-    current_price = float(quote.get("price") or 0)
+    current_price = quote.price
     if current_price <= 0:
         raise ValueError(f"Current price unavailable for {ticker}")
 
-    profile_beta = sector_info.beta if sector_info else 0.0
-    quote_beta = float(quote.get("beta") or 0)
-    raw_beta = profile_beta if profile_beta > 0 else quote_beta
-    beta = raw_beta if raw_beta > 0 else DEFAULT_BETA
+    beta = quote.beta if quote.beta and quote.beta > 0 else DEFAULT_BETA
 
-    # Dividend history — FMP dividends company endpoint
-    try:
-        params = {"apikey": api_key, "symbol": ticker}
-        url = f"{FMP_BASE_URL}/dividends"
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        dividends_raw = resp.json() or []
-        print(f"[DDM] Dividend fetch: {len(dividends_raw)} records")
-    except Exception as exc:
-        print(f"[DDM] Dividend fetch failed: {type(exc).__name__}: {exc}")
-        dividends_raw = []
-
-    # Income statement for EPS (payout ratio calculation)
-    try:
-        income_stmts = _fetch(
-            "income-statement", api_key,
-            symbol=ticker, limit=ACTUALS_YEARS,
-        )
-    except ValueError:
-        income_stmts = []
-
-    # ── Step 2: aggregate dividends by calendar year ──────────────────────────
-    # FMP returns individual dividend payments; we need annual totals.
-    # The dividends endpoint returns objects with keys like:
-    #   date, adjDividend, dividend, recordDate, paymentDate, declarationDate
-    yearly_divs: dict = {}   # year → total DPS
-    for d in dividends_raw:
-        # Try multiple date fields
-        date_str = (
-            d.get("date")
-            or d.get("paymentDate")
-            or d.get("recordDate")
-            or d.get("declarationDate")
-            or ""
-        )
-        if not date_str or len(date_str) < 4:
-            continue
-        try:
-            year = int(date_str[:4])
-            # Try multiple amount fields
-            amount = float(
-                d.get("adjDividend")
-                or d.get("dividend")
-                or d.get("amount")
-                or 0
-            )
-            if amount > 0:
-                yearly_divs[year] = yearly_divs.get(year, 0.0) + amount
-        except (ValueError, TypeError):
-            continue
-
-    print(f"[DDM] {ticker}: found {len(dividends_raw)} dividend records, {len(yearly_divs)} yearly totals: {dict(sorted(yearly_divs.items()))}")
-
-    # Build EPS lookup from income statements
-    eps_by_year: dict = {}
-    for stmt in income_stmts:
-        yr_raw = stmt.get("calendarYear") or (stmt.get("date") or "")[:4]
-        try:
-            yr = int(yr_raw)
-            eps_by_year[yr] = float(stmt.get("epsDiluted") or 0)
-        except (ValueError, TypeError):
-            continue
-
-    # ── Step 3: CAPM cost of equity ───────────────────────────────────────────
+    # ── CAPM cost of equity ───────────────────────────────────────────────
     risk_free_rate, _ = get_risk_free_rate()
     equity_risk_premium, _ = get_equity_risk_premium()
     cost_of_equity = risk_free_rate + beta * equity_risk_premium
 
-    # ── Step 4: build history list ────────────────────────────────────────────
-    if not yearly_divs:
-        # Company doesn't pay dividends — return a minimal result
-        return DDMResult(
-            ticker=ticker,
-            current_price=round(current_price, 2),
-            pays_dividends=False,
-            risk_free_rate=round(risk_free_rate, 4),
-            equity_risk_premium=round(equity_risk_premium, 4),
-            beta=round(beta, 4),
-            cost_of_equity=round(cost_of_equity, 4),
-            history=[],
-            latest_annual_dps=0.0,
-            avg_dps_growth=0.0,
-            weighted_dps_growth=0.0,
-            avg_payout_ratio=0.0,
-            current_yield=0.0,
-            ggm_growth_rate=0.0,
-            ggm_d1=0.0,
-            ggm_intrinsic_value=0.0,
-            ggm_upside_downside=0.0,
-            ts_high_growth_rate=0.0,
-            ts_high_growth_years=5,
-            ts_terminal_growth_rate=0.0,
-            ts_intrinsic_value=0.0,
-            ts_pv_stage1=0.0,
-            ts_pv_terminal=0.0,
-            ts_upside_downside=0.0,
-        )
-
-    sorted_years = sorted(yearly_divs.keys())
-
-    # ── Exclude the current (incomplete) year ─────────────────────────────
-    # The current calendar year will only have a partial dividend total
-    # (e.g. 1 quarter out of 4), which would skew growth rates and the
-    # base DPS used for valuation.  Drop it if present.
+    # ── Extract dividend history from EDGAR data ──────────────────────────
+    # DPS = dividends_paid / diluted_shares per year
     import datetime as _dt
     current_year = _dt.date.today().year
-    if current_year in yearly_divs and len(sorted_years) > 1:
-        sorted_years = [y for y in sorted_years if y != current_year]
-        print(f"[DDM] Excluded incomplete current year {current_year}")
 
-    # Keep only last ACTUALS_YEARS + 1 years (need extra for first growth calc)
+    yearly_divs = {}  # year → DPS
+    eps_by_year = {}  # year → EPS
+
+    for ey in edgar_data.years:
+        yr = ey.fiscal_year
+
+        # Skip current (incomplete) year
+        if yr >= current_year:
+            continue
+
+        eps_val = ey.eps or (ey.net_income / ey.diluted_shares if ey.diluted_shares > 0 else 0.0)
+        eps_by_year[yr] = eps_val
+
+        if ey.dividends_paid and ey.dividends_paid > 0 and ey.diluted_shares > 0:
+            dps = ey.dividends_paid / ey.diluted_shares
+            yearly_divs[yr] = dps
+
+    print(f"[DDM] {ticker}: {len(yearly_divs)} years with dividends: {dict(sorted(yearly_divs.items()))}")
+
+    # ── No dividends → return minimal result ──────────────────────────────
+    if not yearly_divs:
+        return _empty_result(ticker, current_price, risk_free_rate,
+                             equity_risk_premium, beta, cost_of_equity)
+
+    # ── Build history list ────────────────────────────────────────────────
+    sorted_years = sorted(yearly_divs.keys())
+
+    # Keep only last ACTUALS_YEARS + 1 years
     if len(sorted_years) > ACTUALS_YEARS + 1:
         sorted_years = sorted_years[-(ACTUALS_YEARS + 1):]
 
@@ -313,18 +248,20 @@ def fetch_ddm(ticker: str, sector_info: Optional[SectorInfo] = None) -> DDMResul
             dps_growth=round(growth, 4) if growth is not None else None,
         ))
 
-    # ── Step 5: derive assumptions ────────────────────────────────────────────
+    if not history:
+        return _empty_result(ticker, current_price, risk_free_rate,
+                             equity_risk_premium, beta, cost_of_equity)
+
+    # ── Derive assumptions ────────────────────────────────────────────────
     latest_dps = history[-1].annual_dps
 
     growth_rates = [h.dps_growth for h in history if h.dps_growth is not None]
-    # Filter out extreme outliers (> 100% growth or < -50%)
     growth_rates_clean = [g for g in growth_rates if -0.50 <= g <= 1.00]
 
     avg_growth = (
         sum(growth_rates_clean) / len(growth_rates_clean)
         if growth_rates_clean else 0.02
     )
-    # newest-first for weighting
     w_growth = (
         _weighted_growth(list(reversed(growth_rates_clean)))
         if growth_rates_clean else 0.02
@@ -337,10 +274,9 @@ def fetch_ddm(ticker: str, sector_info: Optional[SectorInfo] = None) -> DDMResul
 
     current_yield = latest_dps / current_price if current_price > 0 else 0.0
 
-    # ── Step 6: Gordon Growth Model ───────────────────────────────────────────
-    # Clamp growth rate below cost of equity (GGM requirement)
+    # ── Gordon Growth Model ───────────────────────────────────────────────
     ggm_g = min(w_growth, cost_of_equity - 0.005)
-    ggm_g = max(ggm_g, 0.0)   # floor at 0%
+    ggm_g = max(ggm_g, 0.0)
     ggm_d1 = latest_dps * (1.0 + ggm_g)
     ggm_iv = _compute_ggm(ggm_d1, cost_of_equity, ggm_g)
     ggm_upside = (
@@ -348,11 +284,11 @@ def fetch_ddm(ticker: str, sector_info: Optional[SectorInfo] = None) -> DDMResul
         if current_price > 0 and ggm_iv > 0 else 0.0
     )
 
-    # ── Step 7: Two-Stage DDM ─────────────────────────────────────────────────
-    ts_g1 = w_growth                         # high-growth = recent trend
-    ts_g1 = max(-0.10, min(0.25, ts_g1))    # clamp to [-10%, 25%]
-    ts_n = 5                                 # 5-year high-growth phase
-    ts_g2 = min(0.03, cost_of_equity - 0.01) # terminal: ~3% or below Re
+    # ── Two-Stage DDM ─────────────────────────────────────────────────────
+    ts_g1 = w_growth
+    ts_g1 = max(-0.10, min(0.25, ts_g1))
+    ts_n = 5
+    ts_g2 = min(0.03, cost_of_equity - 0.01)
     ts_g2 = max(ts_g2, 0.0)
 
     ts_pv1, ts_pvt, ts_iv = _compute_two_stage(

@@ -12,19 +12,25 @@ Run with:
 """
 
 import asyncio
+import json
 import os
 from dataclasses import asdict
 from typing import List, Optional
 
 import requests
 from dotenv import find_dotenv, load_dotenv
+# Load .env BEFORE any backend imports that read env vars
+load_dotenv(find_dotenv(), override=True)
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from backend.alpaca_client import fetch_quote
 from backend.analyzer import analyze, analyze_industry
 from backend.comps import fetch_comps
+from backend.edgar_extractor import fetch_edgar_financials
 from backend.finviz_fetcher import fetch_finviz
 from backend.config import PROJECTION_YEARS
 from backend.dcf import fetch_dcf
@@ -32,6 +38,7 @@ from backend.ddm import fetch_ddm
 from backend.financials import fetch_financials
 from backend.industry_classifier import fetch_sector_info
 from backend.industry_config import get_sector_rules
+from backend.industry_profiles import get_industry_profile
 from backend.news_fetcher import fetch_news
 from backend.sec_fetcher import fetch_10k_sections
 from backend.transcript_fetcher import fetch_latest_transcript
@@ -266,12 +273,20 @@ class CompEntryModel(BaseModel):
     is_target: bool = False
 
 
+class ImpliedPrices(BaseModel):
+    pe_implied: Optional[float] = None
+    ev_ebitda_implied: Optional[float] = None
+    ps_implied: Optional[float] = None
+    pb_implied: Optional[float] = None
+
+
 class CompsModel(BaseModel):
     peers: List[CompEntryModel]
     median_pe: Optional[float] = None
     median_ev_ebitda: Optional[float] = None
     median_ps: Optional[float] = None
     median_pb: Optional[float] = None
+    implied_prices: Optional[ImpliedPrices] = None
 
 
 class FinvizModel(BaseModel):
@@ -325,7 +340,11 @@ class AnalysisResponse(BaseModel):
     downplayed_risks: list
     recent_catalysts: list = []
     sentiment_summary: str = ""
+    top_news_indices: list = []
     analyst_summary: str
+
+    # News headlines for frontend rendering
+    news_headlines: list = []
 
     # Industry analysis (best-effort — None if Claude call fails)
     industry_analysis: Optional[IndustryAnalysis] = None
@@ -400,8 +419,8 @@ async def health() -> dict:
     """Returns liveness and data-source reachability status."""
     checks: dict = {}
 
-    # FMP — key presence only (avoids consuming API quota)
-    checks["fmp"] = "ok" if os.getenv("FMP_API_KEY") else "missing_api_key"
+    # Alpaca — key presence check
+    checks["alpaca"] = "ok" if (os.getenv("ALPACA_API_KEY") and os.getenv("ALPACA_SECRET_KEY")) else "missing_api_key"
 
     # FRED — lightweight connectivity check
     try:
@@ -571,29 +590,56 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
     ticker = ticker.upper()
 
     # ------------------------------------------------------------------
-    # Phase 0: sector classification (single fast call — result is used
-    # to adapt DCF assumptions and the Claude analysis prompt)
+    # Phase 0: EDGAR + Alpaca data (shared by all models)
     # ------------------------------------------------------------------
     try:
-        sector_info = await asyncio.to_thread(fetch_sector_info, ticker)
+        edgar_data = await asyncio.to_thread(fetch_edgar_financials, ticker)
     except Exception as exc:
-        print(f"[main] sector info fetch failed — {type(exc).__name__}: {exc}")
+        print(f"[main] EDGAR fetch failed — {type(exc).__name__}: {exc}")
+        edgar_data = None
+
+    try:
+        alpaca_quote = await asyncio.to_thread(fetch_quote, ticker)
+    except Exception as exc:
+        print(f"[main] Alpaca quote failed — {type(exc).__name__}: {exc}")
+        alpaca_quote = None
+
+    # Build sector info from EDGAR data
+    if edgar_data is not None:
+        sector_info = fetch_sector_info(ticker, edgar_data=edgar_data, quote=alpaca_quote)
+    else:
         sector_info = None
 
+    profile = get_industry_profile(sector_info.sector if sector_info else "")
     sector_rules = get_sector_rules(sector_info.sector if sector_info else "")
 
     # ------------------------------------------------------------------
-    # Phase 1: fetch 10-K, transcript, and DCF data concurrently
+    # Phase 1: fetch 10-K, transcript, and financial models concurrently
     # ------------------------------------------------------------------
+    def _run_dcf():
+        if edgar_data and alpaca_quote:
+            return fetch_dcf(ticker, edgar_data, alpaca_quote, profile)
+        return None
+
+    def _run_ddm():
+        if edgar_data and alpaca_quote:
+            return fetch_ddm(ticker, edgar_data, alpaca_quote, profile)
+        return None
+
+    def _run_financials():
+        if edgar_data:
+            return fetch_financials(ticker, edgar_data)
+        return None
+
     results = await asyncio.gather(
         asyncio.to_thread(fetch_10k_sections, ticker),
         asyncio.to_thread(
             fetch_latest_transcript, ticker,
             sector_info.company_name if sector_info else "",
         ),
-        asyncio.to_thread(fetch_dcf, ticker, sector_info),
-        asyncio.to_thread(fetch_ddm, ticker, sector_info),
-        asyncio.to_thread(fetch_financials, ticker),
+        asyncio.to_thread(_run_dcf),
+        asyncio.to_thread(_run_ddm),
+        asyncio.to_thread(_run_financials),
         asyncio.to_thread(fetch_finviz, ticker),
         asyncio.to_thread(fetch_news, ticker),
         return_exceptions=True,
@@ -606,7 +652,8 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         finviz_data = None
     else:
         finviz_data = finviz_result
-        print(f"[main] Finviz succeeded — {len(finviz_data.peers)} peers, target={finviz_data.analyst_target}")
+        if finviz_data:
+            print(f"[main] Finviz succeeded — {len(finviz_data.peers)} peers, target={finviz_data.analyst_target}")
 
     # Phase 1b: fetch comps using Finviz peers (requires finviz to complete first)
     try:
@@ -639,26 +686,28 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         transcript_result if transcript_available else None  # type: ignore[assignment]
     )
 
-    # DCF is optional — degrade gracefully if FMP data is unavailable
-    if isinstance(dcf_result, Exception):
-        print(f"[main] DCF failed — {type(dcf_result).__name__}: {dcf_result}")
+    # DCF is optional — degrade gracefully if EDGAR data is unavailable
+    if dcf_result is None or isinstance(dcf_result, Exception):
+        if isinstance(dcf_result, Exception):
+            print(f"[main] DCF failed — {type(dcf_result).__name__}: {dcf_result}")
         dcf_available = False
         dcf_data = None
     else:
         print(
-            f"[main] DCF succeeded — intrinsic_value={dcf_result.intrinsic_value}, "  # type: ignore[union-attr]
-            f"current_price={dcf_result.current_price}"  # type: ignore[union-attr]
+            f"[main] DCF succeeded — intrinsic_value={dcf_result.intrinsic_value}, "
+            f"current_price={dcf_result.current_price}"
         )
         dcf_available = True
-        dcf_data = dcf_result  # type: ignore[assignment]
+        dcf_data = dcf_result
 
     # DDM is optional — degrade gracefully
-    if isinstance(ddm_result, Exception):
-        print(f"[main] DDM failed — {type(ddm_result).__name__}: {ddm_result}")
+    if ddm_result is None or isinstance(ddm_result, Exception):
+        if isinstance(ddm_result, Exception):
+            print(f"[main] DDM failed — {type(ddm_result).__name__}: {ddm_result}")
         ddm_available = False
         ddm_data = None
     else:
-        ddm_data = ddm_result  # type: ignore[assignment]
+        ddm_data = ddm_result
         ddm_available = ddm_data.pays_dividends
         print(
             f"[main] DDM {'succeeded' if ddm_available else 'N/A (no dividends)'}"
@@ -666,12 +715,13 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         )
 
     # Financials are optional — degrade gracefully
-    if isinstance(financials_result, Exception):
-        print(f"[main] Financials failed — {type(financials_result).__name__}: {financials_result}")
+    if financials_result is None or isinstance(financials_result, Exception):
+        if isinstance(financials_result, Exception):
+            print(f"[main] Financials failed — {type(financials_result).__name__}: {financials_result}")
         financials_available = False
         financials_data = None
     else:
-        financials_data = financials_result  # type: ignore[assignment]
+        financials_data = financials_result
         financials_available = len(financials_data.years) > 0
         print(f"[main] Financials succeeded — {len(financials_data.years)} years")
 
@@ -681,7 +731,7 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         comps_available = False
         comps_data = None
     else:
-        comps_data = comps_result  # type: ignore[assignment]
+        comps_data = comps_result
         comps_available = len(comps_data.peers) > 1
         print(f"[main] Comps succeeded — {len(comps_data.peers)} entries")
 
@@ -691,7 +741,7 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         print(f"[main] News failed — {type(news_result).__name__}: {news_result}")
         news_data = None
     else:
-        news_data = news_result  # type: ignore[assignment]
+        news_data = news_result
         news_text = news_data.news_summary_text
         total = len(news_data.news_items) + len(news_data.social_posts)
         print(f"[main] News succeeded — {total} items")
@@ -808,7 +858,7 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
             for t in (transcript_data.get("all_transcripts") or [])
         ] if transcript_data else [],
         dcf_available=dcf_available,
-        current_price=dcf_data.current_price if dcf_data else None,
+        current_price=dcf_data.current_price if dcf_data else (alpaca_quote.price if alpaca_quote else None),
         intrinsic_value=dcf_data.intrinsic_value if dcf_data else None,
         upside_downside=dcf_data.upside_downside if dcf_data else None,
         dcf_model=dcf_model_payload,
@@ -818,7 +868,12 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
         downplayed_risks=result.downplayed_risks,
         recent_catalysts=result.recent_catalysts,
         sentiment_summary=result.sentiment_summary,
+        top_news_indices=result.top_news_indices,
         analyst_summary=result.analyst_summary,
+        news_headlines=[
+            {"headline": n.headline, "source": n.source, "url": n.url, "date": n.date}
+            for n in (news_data.news_items if news_data else [])
+        ],
         industry_analysis=IndustryAnalysis(
             threat_of_new_entrants=PorterForceItem(
                 rating=industry_data.threat_of_new_entrants.rating,
@@ -870,6 +925,12 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
             median_ev_ebitda=comps_data.median_ev_ebitda,
             median_ps=comps_data.median_ps,
             median_pb=comps_data.median_pb,
+            implied_prices=ImpliedPrices(
+                pe_implied=comps_data.pe_implied,
+                ev_ebitda_implied=comps_data.ev_ebitda_implied,
+                ps_implied=comps_data.ps_implied,
+                pb_implied=comps_data.pb_implied,
+            ),
         ) if comps_data and comps_available else None,
         finviz=FinvizModel(
             analyst_target=finviz_data.analyst_target,
@@ -886,6 +947,381 @@ async def analyze_ticker(ticker: str) -> AnalysisResponse:
             inst_own=finviz_data.inst_own,
             peers=finviz_data.peers,
         ) if finviz_data else None,
+    )
+
+
+@app.get(
+    "/analyze-stream/{ticker}",
+    tags=["analysis"],
+    summary="Full analysis with SSE progress events",
+)
+async def analyze_ticker_stream(ticker: str) -> StreamingResponse:
+    """
+    Same logic as /analyze/{ticker} but yields Server-Sent Events as each
+    phase completes so the client can show a stepped progress bar.
+
+    Event format:
+      data: {"type":"progress","step":N,"total":7,"label":"..."}
+      data: {"type":"done","payload":{<AnalysisResponse JSON>}}
+      data: {"type":"error","message":"..."}
+    """
+    async def generate():
+        t = ticker.upper()
+        total = 7
+
+        def _ev(obj: dict) -> str:
+            return f"data: {json.dumps(obj)}\n\n"
+
+        try:
+            # ── Step 1: EDGAR + Alpaca data ───────────────────────────────
+            try:
+                edgar_data = await asyncio.to_thread(fetch_edgar_financials, t)
+            except Exception as exc:
+                print(f"[stream] EDGAR failed — {type(exc).__name__}: {exc}")
+                edgar_data = None
+
+            try:
+                alpaca_quote = await asyncio.to_thread(fetch_quote, t)
+            except Exception as exc:
+                print(f"[stream] Alpaca failed — {type(exc).__name__}: {exc}")
+                alpaca_quote = None
+
+            if edgar_data is not None:
+                sector_info = fetch_sector_info(t, edgar_data=edgar_data, quote=alpaca_quote)
+            else:
+                sector_info = None
+
+            profile = get_industry_profile(sector_info.sector if sector_info else "")
+            sector_rules = get_sector_rules(sector_info.sector if sector_info else "")
+
+            yield _ev({"type": "progress", "step": 1, "total": total, "label": "Classifying sector..."})
+
+            # ── Step 2: announce upcoming fetches ─────────────────────────
+            yield _ev({"type": "progress", "step": 2, "total": total, "label": "Fetching SEC filings & financial data..."})
+
+            tenk_result, transcript_result = await asyncio.gather(
+                asyncio.to_thread(fetch_10k_sections, t),
+                asyncio.to_thread(
+                    fetch_latest_transcript, t,
+                    sector_info.company_name if sector_info else "",
+                ),
+                return_exceptions=True,
+            )
+
+            # ── Step 3: 10-K ──────────────────────────────────────────────
+            yield _ev({"type": "progress", "step": 3, "total": total, "label": "Loading 10-K filing..."})
+
+            if isinstance(tenk_result, requests.HTTPError):
+                yield _ev({"type": "error", "message": f"SEC EDGAR upstream error: {tenk_result}"})
+                return
+            if isinstance(tenk_result, Exception):
+                yield _ev({"type": "error", "message": str(tenk_result)})
+                return
+
+            tenk_data: dict = tenk_result  # type: ignore[assignment]
+
+            # ── Step 4: transcript ────────────────────────────────────────
+            yield _ev({"type": "progress", "step": 4, "total": total, "label": "Loading earnings transcripts..."})
+
+            transcript_available = not isinstance(transcript_result, Exception)
+            transcript_data = transcript_result if transcript_available else None  # type: ignore[assignment]
+
+            # Fetch financial models + Finviz concurrently
+            def _s_dcf():
+                return fetch_dcf(t, edgar_data, alpaca_quote, profile) if edgar_data and alpaca_quote else None
+            def _s_ddm():
+                return fetch_ddm(t, edgar_data, alpaca_quote, profile) if edgar_data and alpaca_quote else None
+            def _s_fin():
+                return fetch_financials(t, edgar_data) if edgar_data else None
+
+            dcf_result, ddm_result, financials_result, finviz_result, news_result = await asyncio.gather(
+                asyncio.to_thread(_s_dcf),
+                asyncio.to_thread(_s_ddm),
+                asyncio.to_thread(_s_fin),
+                asyncio.to_thread(fetch_finviz, t),
+                asyncio.to_thread(fetch_news, t),
+                return_exceptions=True,
+            )
+
+            # Finviz is optional — degrade gracefully
+            if isinstance(finviz_result, Exception):
+                print(f"[stream] Finviz failed — {type(finviz_result).__name__}: {finviz_result}")
+                finviz_data = None
+            else:
+                finviz_data = finviz_result
+                if finviz_data:
+                    print(f"[stream] Finviz succeeded — {len(finviz_data.peers)} peers, target={finviz_data.analyst_target}")
+
+            # Comps — run after Finviz so we can pass its peer list
+            try:
+                comps_result = await asyncio.to_thread(
+                    fetch_comps, t,
+                    finviz_peers=finviz_data.peers if finviz_data else None,
+                )
+            except Exception as exc:
+                comps_result = exc
+
+            # ── Step 5: financials done ───────────────────────────────────
+            yield _ev({"type": "progress", "step": 5, "total": total, "label": "Crunching financials (DCF, DDM, comps)..."})
+
+            if dcf_result is None or isinstance(dcf_result, Exception):
+                if isinstance(dcf_result, Exception):
+                    print(f"[stream] DCF failed — {type(dcf_result).__name__}: {dcf_result}")
+                dcf_available = False
+                dcf_data = None
+            else:
+                dcf_available = True
+                dcf_data = dcf_result
+
+            if ddm_result is None or isinstance(ddm_result, Exception):
+                if isinstance(ddm_result, Exception):
+                    print(f"[stream] DDM failed — {type(ddm_result).__name__}: {ddm_result}")
+                ddm_available = False
+                ddm_data = None
+            else:
+                ddm_data = ddm_result
+                ddm_available = ddm_data.pays_dividends
+
+            if financials_result is None or isinstance(financials_result, Exception):
+                if isinstance(financials_result, Exception):
+                    print(f"[stream] Financials failed — {type(financials_result).__name__}: {financials_result}")
+                financials_available = False
+                financials_data = None
+            else:
+                financials_data = financials_result
+                financials_available = len(financials_data.years) > 0
+
+            if isinstance(comps_result, Exception):
+                print(f"[stream] Comps failed — {type(comps_result).__name__}: {comps_result}")
+                comps_available = False
+                comps_data = None
+            else:
+                comps_data = comps_result
+                comps_available = len(comps_data.peers) > 1
+
+            news_text = ""
+            news_data = None
+            if isinstance(news_result, Exception):
+                print(f"[stream] News failed — {type(news_result).__name__}: {news_result}")
+            else:
+                news_data = news_result
+                news_text = news_data.news_summary_text
+
+            # ── Step 6: Claude analysis ───────────────────────────────────
+            yield _ev({"type": "progress", "step": 6, "total": total, "label": "Running AI analysis..."})
+
+            tenk_text = "\n\n".join(
+                filter(None, [tenk_data.get("mda"), tenk_data.get("risk_factors")])
+            )
+            transcript_text = transcript_data["content"] if transcript_data else ""
+            _sector = sector_info.sector if sector_info else ""
+
+            claude_results = await asyncio.gather(
+                asyncio.to_thread(
+                    analyze, t, tenk_text, transcript_text,
+                    _sector, sector_rules.analyst_guidance, news_text,
+                ),
+                asyncio.to_thread(
+                    analyze_industry, t, tenk_text, transcript_text, _sector,
+                ),
+                return_exceptions=True,
+            )
+            analysis_result, industry_result = claude_results
+
+            if isinstance(analysis_result, Exception):
+                yield _ev({"type": "error", "message": str(analysis_result)})
+                return
+
+            result = analysis_result  # type: ignore[assignment]
+
+            if isinstance(industry_result, Exception):
+                print(f"[stream] Industry analysis failed — {type(industry_result).__name__}: {industry_result}")
+                industry_data = None
+            else:
+                industry_data = industry_result  # type: ignore[assignment]
+
+            # ── Step 7: assemble response ─────────────────────────────────
+            yield _ev({"type": "progress", "step": 7, "total": total, "label": "Finalizing report..."})
+
+            dcf_model_payload: Optional[DCFModel] = None
+            if dcf_data is not None:
+                dcf_model_payload = DCFModel(
+                    risk_free_rate        = dcf_data.risk_free_rate,
+                    equity_risk_premium   = dcf_data.equity_risk_premium,
+                    beta                  = dcf_data.beta,
+                    cost_of_equity        = dcf_data.cost_of_equity,
+                    actuals               = [YearData(**asdict(a)) for a in dcf_data.actuals],
+                    base_revenue_growth   = dcf_data.base_revenue_growth,
+                    base_op_margin        = dcf_data.base_op_margin,
+                    base_interest_expense = dcf_data.base_interest_expense,
+                    base_tax_rate         = dcf_data.base_tax_rate,
+                    base_capex_pct        = dcf_data.base_capex_pct,
+                    base_da_pct           = dcf_data.base_da_pct,
+                    base_shares_growth    = dcf_data.base_shares_growth,
+                    exit_pe_multiple      = dcf_data.exit_pe_multiple,
+                    base_diluted_shares   = dcf_data.base_diluted_shares,
+                    pv_fcfs               = dcf_data.pv_fcfs,
+                    pv_terminal_value     = dcf_data.pv_terminal_value,
+                    equity_value          = dcf_data.equity_value,
+                )
+
+            ddm_model_payload: Optional[DDMModel] = None
+            if ddm_data is not None:
+                ddm_model_payload = DDMModel(
+                    pays_dividends          = ddm_data.pays_dividends,
+                    risk_free_rate          = ddm_data.risk_free_rate,
+                    equity_risk_premium     = ddm_data.equity_risk_premium,
+                    beta                    = ddm_data.beta,
+                    cost_of_equity          = ddm_data.cost_of_equity,
+                    history                 = [
+                        DDMDividendYear(
+                            year=h.year, annual_dps=h.annual_dps,
+                            payout_ratio=h.payout_ratio, dps_growth=h.dps_growth,
+                        )
+                        for h in ddm_data.history
+                    ],
+                    latest_annual_dps       = ddm_data.latest_annual_dps,
+                    avg_dps_growth          = ddm_data.avg_dps_growth,
+                    weighted_dps_growth     = ddm_data.weighted_dps_growth,
+                    avg_payout_ratio        = ddm_data.avg_payout_ratio,
+                    current_yield           = ddm_data.current_yield,
+                    ggm_growth_rate         = ddm_data.ggm_growth_rate,
+                    ggm_d1                  = ddm_data.ggm_d1,
+                    ggm_intrinsic_value     = ddm_data.ggm_intrinsic_value,
+                    ggm_upside_downside     = ddm_data.ggm_upside_downside,
+                    ts_high_growth_rate     = ddm_data.ts_high_growth_rate,
+                    ts_high_growth_years    = ddm_data.ts_high_growth_years,
+                    ts_terminal_growth_rate = ddm_data.ts_terminal_growth_rate,
+                    ts_intrinsic_value      = ddm_data.ts_intrinsic_value,
+                    ts_pv_stage1            = ddm_data.ts_pv_stage1,
+                    ts_pv_terminal          = ddm_data.ts_pv_terminal,
+                    ts_upside_downside      = ddm_data.ts_upside_downside,
+                )
+
+            response = AnalysisResponse(
+                ticker               = result.ticker,
+                filing_date          = tenk_data["filing_date"],
+                cik                  = tenk_data["cik"],
+                sector               = sector_info.sector if sector_info else None,
+                industry             = sector_info.industry if sector_info else None,
+                filing_urls          = [FilingLink(**f) for f in tenk_data.get("filing_urls", [])],
+                transcript_available = transcript_available,
+                transcript_date      = transcript_data["date"] if transcript_data else None,
+                transcript_quarter   = transcript_data["quarter"] if transcript_data else None,
+                transcript_year      = transcript_data["year"] if transcript_data else None,
+                transcript_urls      = [
+                    TranscriptLink(**tl)
+                    for tl in (transcript_data.get("all_transcripts") or [])
+                ] if transcript_data else [],
+                dcf_available        = dcf_available,
+                current_price        = dcf_data.current_price if dcf_data else (alpaca_quote.price if alpaca_quote else None),
+                intrinsic_value      = dcf_data.intrinsic_value if dcf_data else None,
+                upside_downside      = dcf_data.upside_downside if dcf_data else None,
+                dcf_model            = dcf_model_payload,
+                dcf_warning          = sector_rules.dcf_warning,
+                overall_rating       = result.overall_rating,
+                thesis_statement     = result.thesis_statement,
+                key_metrics          = result.key_metrics,
+                bull_case            = result.bull_case,
+                bear_case            = result.bear_case,
+                downplayed_risks     = result.downplayed_risks,
+                recent_catalysts     = result.recent_catalysts,
+                sentiment_summary    = result.sentiment_summary,
+                top_news_indices     = result.top_news_indices,
+                analyst_summary      = result.analyst_summary,
+                news_headlines       = [
+                    {"headline": n.headline, "source": n.source, "url": n.url, "date": n.date}
+                    for n in (news_data.news_items if news_data else [])
+                ],
+                industry_analysis    = IndustryAnalysis(
+                    threat_of_new_entrants       = PorterForceItem(
+                        rating=industry_data.threat_of_new_entrants.rating,
+                        explanation=industry_data.threat_of_new_entrants.explanation,
+                    ),
+                    bargaining_power_of_suppliers = PorterForceItem(
+                        rating=industry_data.bargaining_power_of_suppliers.rating,
+                        explanation=industry_data.bargaining_power_of_suppliers.explanation,
+                    ),
+                    bargaining_power_of_buyers    = PorterForceItem(
+                        rating=industry_data.bargaining_power_of_buyers.rating,
+                        explanation=industry_data.bargaining_power_of_buyers.explanation,
+                    ),
+                    threat_of_substitutes         = PorterForceItem(
+                        rating=industry_data.threat_of_substitutes.rating,
+                        explanation=industry_data.threat_of_substitutes.explanation,
+                    ),
+                    competitive_rivalry           = PorterForceItem(
+                        rating=industry_data.competitive_rivalry.rating,
+                        explanation=industry_data.competitive_rivalry.explanation,
+                    ),
+                    industry_structure    = industry_data.industry_structure,
+                    competitive_position  = industry_data.competitive_position,
+                    key_kpis              = [
+                        IndustryKPI(metric=k.metric, why_it_matters=k.why_it_matters)
+                        for k in industry_data.key_kpis
+                    ],
+                    tailwinds  = industry_data.tailwinds,
+                    headwinds  = industry_data.headwinds,
+                ) if industry_data else None,
+                ddm_available        = ddm_available,
+                ddm_model            = ddm_model_payload,
+                financials_available = financials_available,
+                financials           = [
+                    FinancialsYearModel(**{
+                        k: getattr(y, k) for k in FinancialsYearModel.model_fields
+                    })
+                    for y in financials_data.years
+                ] if financials_data and financials_available else None,
+                comps_available      = comps_available,
+                comps                = CompsModel(
+                    peers=[
+                        CompEntryModel(**{
+                            k: getattr(e, k) for k in CompEntryModel.model_fields
+                        })
+                        for e in comps_data.peers
+                    ],
+                    median_pe        = comps_data.median_pe,
+                    median_ev_ebitda = comps_data.median_ev_ebitda,
+                    median_ps        = comps_data.median_ps,
+                    median_pb        = comps_data.median_pb,
+                    implied_prices   = ImpliedPrices(
+                        pe_implied        = comps_data.pe_implied,
+                        ev_ebitda_implied = comps_data.ev_ebitda_implied,
+                        ps_implied        = comps_data.ps_implied,
+                        pb_implied        = comps_data.pb_implied,
+                    ),
+                ) if comps_data and comps_available else None,
+                finviz               = FinvizModel(
+                    analyst_target=finviz_data.analyst_target,
+                    analyst_recom=finviz_data.analyst_recom,
+                    forward_pe=finviz_data.forward_pe,
+                    peg=finviz_data.peg,
+                    ps=finviz_data.ps,
+                    pb=finviz_data.pb,
+                    pfcf=finviz_data.pfcf,
+                    roe=finviz_data.roe,
+                    beta=finviz_data.beta,
+                    dividend_yield=finviz_data.dividend_yield,
+                    insider_own=finviz_data.insider_own,
+                    inst_own=finviz_data.inst_own,
+                    peers=finviz_data.peers,
+                ) if finviz_data else None,
+            )
+
+            payload_json = response.model_dump_json()
+            yield f'data: {{"type":"done","payload":{payload_json}}}\n\n'
+
+        except Exception as exc:
+            yield _ev({"type": "error", "message": f"Analysis failed: {exc}"})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

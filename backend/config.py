@@ -2,7 +2,7 @@
 
 DEFAULT_BETA: float = 1.0
 PROJECTION_YEARS: int = 5
-ACTUALS_YEARS: int = 5                 # historical years fetched from FMP
+ACTUALS_YEARS: int = 5                 # historical years from EDGAR
 TAX_RATE: float = 0.21                 # fallback statutory rate
 DEFAULT_EXIT_PE: float = 20.0          # default P/E exit multiple for terminal value
 FALLBACK_RISK_FREE_RATE: float = 0.043

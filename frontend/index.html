@@ -34,6 +34,9 @@
     <div class="spinner"></div>
     <p>Fetching filings and running analysis&hellip;</p>
     <p class="sub">This may take 20&ndash;40 seconds.</p>
+    <div id="analysis-status" hidden>
+      <div id="status-steps"></div>
+    </div>
   </div>
 
   <!-- Error -->
@@ -51,8 +54,33 @@
     <!-- Source document links -->
     <div class="source-docs" id="source-docs" hidden></div>
 
-    <!-- Price comparison widget -->
-    <div class="price-widget" id="price-widget"></div>
+    <!-- Price / valuation banner -->
+    <div class="price-widget" id="price-widget">
+      <div class="price-section">
+        <div class="price-label">Current Price</div>
+        <div class="price-value" id="current-price">—</div>
+      </div>
+      <div class="valuations-row">
+        <div class="valuation-card" id="dcf-val-card" hidden>
+          <div class="val-label">DCF Model</div>
+          <div class="val-price" id="dcf-iv"></div>
+          <div class="val-upside" id="dcf-upside"></div>
+        </div>
+        <div class="valuation-card" id="ddm-val-card" hidden>
+          <div class="val-label">DDM Model</div>
+          <div class="val-price" id="ddm-iv"></div>
+          <div class="val-upside" id="ddm-upside"></div>
+        </div>
+        <div class="valuation-card" id="comps-val-card" hidden>
+          <div class="val-label">Comps</div>
+          <div class="val-range" id="comps-iv-range"></div>
+          <div class="val-upside" id="comps-upside"></div>
+        </div>
+      </div>
+      <p class="price-unavailable" id="price-unavailable" hidden>
+        Live price &amp; valuation unavailable for this ticker.
+      </p>
+    </div>
 
     <!-- Tab bar -->
     <div class="tab-bar">
@@ -67,6 +95,7 @@
     <!-- ── Analysis tab ── -->
     <div id="tab-analysis">
       <div id="rating-thesis" hidden></div>
+      <div id="valuation-context" hidden></div>
       <div id="key-metrics-strip" hidden></div>
 
       <div class="two-col">

@@ -36,37 +36,70 @@ function renderMeta(data) {
   `;
 }
 
-/* ── Render: price widget ── */
-function renderPriceWidget(data) {
-  const widget = document.getElementById('price-widget');
+/* ── Upside badge helper ── */
+function _upsideBadge(el, pct, suffix) {
+  const isUp  = pct >= 0;
+  const label = suffix || (isUp ? 'UPSIDE' : 'DOWNSIDE');
+  el.className   = `val-upside ${isUp ? 'positive' : 'negative'}`;
+  el.textContent = `${isUp ? '\u25b2' : '\u25bc'} ${Math.abs(pct).toFixed(1)}% ${label}`;
+}
 
-  if (!data.dcf_available) {
-    widget.innerHTML = '<p class="price-unavailable">Live price &amp; DCF valuation unavailable for this ticker.</p>';
+/* ── Render: price / valuation banner ── */
+function renderPriceWidget(data) {
+  const priceEl   = document.getElementById('current-price');
+  const unavailEl = document.getElementById('price-unavailable');
+  const dcfCard   = document.getElementById('dcf-val-card');
+  const ddmCard   = document.getElementById('ddm-val-card');
+  const compsCard = document.getElementById('comps-val-card');
+
+  dcfCard.hidden   = true;
+  ddmCard.hidden   = true;
+  compsCard.hidden = true;
+  unavailEl.hidden = true;
+
+  if (!data.current_price) {
+    unavailEl.hidden = false;
     return;
   }
 
-  const pct   = data.upside_downside;
-  const isUp  = pct >= 0;
-  const cls   = isUp ? 'up' : 'down';
-  const arrow = isUp ? '\u25b2' : '\u25bc';
-  const label = isUp ? 'Upside' : 'Downside';
+  priceEl.textContent = `$${data.current_price.toFixed(2)}`;
 
-  widget.innerHTML = `
-    <div class="price-col">
-      <div class="price-label">Current Price</div>
-      <div class="price-value">$${data.current_price.toFixed(2)}</div>
-    </div>
-    <div class="price-divider"></div>
-    <div class="upside-badge ${cls}">
-      <div class="upside-pct">${arrow} ${Math.abs(pct).toFixed(1)}%</div>
-      <div class="upside-sub">${label} to IV</div>
-    </div>
-    <div class="price-divider"></div>
-    <div class="price-col">
-      <div class="price-label">Intrinsic Value (DCF)</div>
-      <div class="price-value">$${data.intrinsic_value.toFixed(2)}</div>
-    </div>
-  `;
+  // DCF card
+  if (data.dcf_available && data.intrinsic_value != null) {
+    document.getElementById('dcf-iv').textContent = `$${data.intrinsic_value.toFixed(2)}`;
+    _upsideBadge(document.getElementById('dcf-upside'), data.upside_downside);
+    dcfCard.hidden = false;
+  }
+
+  // DDM card
+  if (data.ddm_available && data.ddm_model && data.ddm_model.ggm_intrinsic_value) {
+    const ggmIv  = data.ddm_model.ggm_intrinsic_value;
+    const ddmPct = (ggmIv / data.current_price - 1) * 100;
+    document.getElementById('ddm-iv').textContent = `$${ggmIv.toFixed(2)}`;
+    _upsideBadge(document.getElementById('ddm-upside'), ddmPct);
+    ddmCard.hidden = false;
+  }
+
+  // Comps card
+  if (data.comps_available && data.comps && data.comps.implied_prices) {
+    const ip   = data.comps.implied_prices;
+    const vals = [ip.pe_implied, ip.ev_ebitda_implied, ip.ps_implied, ip.pb_implied]
+                   .filter(v => v != null && v > 0);
+    if (vals.length >= 1) {
+      const lo  = Math.min(...vals);
+      const hi  = Math.max(...vals);
+      const mid = (lo + hi) / 2;
+      document.getElementById('comps-iv-range').textContent = vals.length >= 2
+        ? `$${Math.round(lo)} \u2013 $${Math.round(hi)}`
+        : `$${lo.toFixed(2)}`;
+      _upsideBadge(document.getElementById('comps-upside'), (mid / data.current_price - 1) * 100, 'TO MIDPOINT');
+      compsCard.hidden = false;
+    }
+  }
+
+  if (dcfCard.hidden && ddmCard.hidden && compsCard.hidden) {
+    unavailEl.hidden = false;
+  }
 }
 
 /* ── Render: source document links ── */
@@ -137,6 +170,81 @@ function renderRatingBadge(data) {
 }
 
 
+/* ── Render: valuation context banner ── */
+function renderValuationContext(data) {
+  const container = document.getElementById('valuation-context');
+
+  if (!data.dcf_available) {
+    hide(container);
+    return;
+  }
+
+  const QUALITY_SCORE = {
+    'Strong Buy':   2,
+    'Bullish':      1,
+    'Neutral':      0,
+    'Bearish':     -1,
+    'Strong Sell': -2,
+  };
+
+  const rating    = data.overall_rating || 'Neutral';
+  const pct       = data.upside_downside;
+  const score     = QUALITY_SCORE[rating] ?? 0;
+  const valSignal = pct > 20 ? 'undervalued' : pct < -20 ? 'overvalued' : 'fairly valued';
+
+  const bullishOvervalued  = score > 0 && valSignal === 'overvalued';
+  const bearishUndervalued = score < 0 && valSignal === 'undervalued';
+
+  if (!bullishOvervalued && !bearishUndervalued) {
+    hide(container);
+    return;
+  }
+
+  const ticker = escapeHtml(data.ticker);
+  const absPct = Math.abs(pct).toFixed(1);
+
+  let explanation;
+  if (bullishOvervalued) {
+    explanation = `Our fundamental analysis rates ${ticker} as <strong>${escapeHtml(rating)}</strong> based on business quality, but the DCF model suggests the stock trades ${absPct}% above intrinsic value. Strong fundamentals are already priced in — investors are paying a premium for quality. Consider whether the moat justifies the premium, similar to how Morningstar separates its Economic Moat rating from its star rating.`;
+  } else {
+    explanation = `Our fundamental analysis rates ${ticker} as <strong>${escapeHtml(rating)}</strong>, but the DCF model suggests ${absPct}% upside to intrinsic value. The market may be pricing in risks that our model doesn't fully capture, or this could represent a contrarian opportunity.`;
+  }
+
+  const ratingStyle = RATING_STYLES[rating] || RATING_STYLES['Neutral'];
+  const valLabel    = valSignal === 'overvalued'  ? 'Overvalued'
+                    : valSignal === 'undervalued' ? 'Undervalued'
+                    : 'Fair Value';
+  const valColor    = valSignal === 'overvalued'  ? '#ef4444'
+                    : valSignal === 'undervalued' ? '#059669'
+                    : '#6b7280';
+  const valSign     = pct >= 0 ? '+' : '';
+
+  container.innerHTML = `
+    <div class="valuation-context-banner">
+      <div class="vc-header">
+        <span>&#9889;</span>
+        <span>VALUATION DISCONNECT</span>
+      </div>
+      <p class="vc-explanation">${explanation}</p>
+      <div class="vc-cards">
+        <div class="vc-card">
+          <div class="vc-card-label">BUSINESS QUALITY</div>
+          <div class="vc-card-value">
+            <span class="rating-badge" style="background:${ratingStyle.bg};color:${ratingStyle.text}">${escapeHtml(rating)}</span>
+          </div>
+        </div>
+        <div class="vc-card">
+          <div class="vc-card-label">VALUATION</div>
+          <div class="vc-card-value" style="color:${valColor}">${valSign}${pct.toFixed(1)}%</div>
+          <div style="font-size:0.8rem;color:${valColor};margin-top:4px;font-weight:600">${valLabel}</div>
+        </div>
+      </div>
+    </div>
+  `;
+  show(container);
+}
+
+
 /* ── Render: key metrics strip ── */
 function renderKeyMetrics(data) {
   const container = document.getElementById('key-metrics-strip');
@@ -165,7 +273,7 @@ function renderKeyMetrics(data) {
 }
 
 
-/* ── Render: structured bull/bear lists (collapsible) ── */
+/* ── Render: structured bull/bear lists ── */
 function renderStructuredList(listEl, items) {
   if (!items || items.length === 0) {
     listEl.innerHTML = '<li>No data available.</li>';
@@ -176,12 +284,11 @@ function renderStructuredList(listEl, items) {
     if (typeof item === 'object' && item.headline) {
       return `
         <li class="structured-item">
-          <div class="item-headline" onclick="this.parentElement.classList.toggle('expanded')">
-            <span class="num">${i + 1}</span>
-            <span class="headline-text">${parseMarkdown(item.headline)}</span>
-            <span class="expand-icon">&#9662;</span>
+          <span class="num">${i + 1}</span>
+          <div class="item-content">
+            <div class="headline-text">${parseMarkdown(item.headline)}</div>
+            <div class="item-detail">${parseMarkdown(item.detail)}</div>
           </div>
-          <div class="item-detail">${parseMarkdown(item.detail)}</div>
         </li>
       `;
     }
@@ -200,13 +307,28 @@ function renderList(listEl, items) {
 }
 
 
-/* ── Render: catalysts & sentiment ── */
+/* ── Relative date helper ── */
+function _relativeDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7)  return `${days}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+
+/* ── Render: catalysts, sentiment & top news ── */
 function renderCatalysts(data) {
   const section = document.getElementById('catalysts-section');
   const hasCatalysts = data.recent_catalysts && data.recent_catalysts.length > 0;
   const hasSentiment = data.sentiment_summary && data.sentiment_summary.length > 0;
+  const hasNews      = data.news_headlines && data.news_headlines.length > 0;
 
-  if (!hasCatalysts && !hasSentiment) {
+  if (!hasCatalysts && !hasSentiment && !hasNews) {
     hide(section);
     return;
   }
@@ -223,4 +345,44 @@ function renderCatalysts(data) {
     document.getElementById('sentiment-text').innerHTML =
       '<span style="color:var(--muted);font-style:italic;">No social media data available.</span>';
   }
+
+  // ── Top news section ──────────────────────────────────────────────────────
+  let newsEl = document.getElementById('news-headlines-section');
+  if (!newsEl) {
+    newsEl = document.createElement('div');
+    newsEl.id = 'news-headlines-section';
+    section.appendChild(newsEl);
+  }
+
+  if (!hasNews) {
+    newsEl.hidden = true;
+    return;
+  }
+
+  const indices = (data.top_news_indices && data.top_news_indices.length > 0)
+    ? data.top_news_indices
+    : [0, 1, 2, 3, 4];
+
+  const selected = indices
+    .map(i => data.news_headlines[i])
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const rows = selected.map(item => `
+    <a class="news-link-row" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
+      <span class="news-source-badge">${escapeHtml(item.source || 'News')}</span>
+      <span class="news-headline-text">${escapeHtml(item.headline)}</span>
+      <span class="news-date">${_relativeDate(item.date)}</span>
+    </a>
+  `).join('');
+
+  newsEl.className = 'news-headlines-section';
+  newsEl.innerHTML = `
+    <div class="card-header" style="margin-bottom:12px">
+      <div class="card-icon">&#9889;</div>
+      <span class="card-title">TOP NEWS</span>
+    </div>
+    ${rows}
+  `;
+  newsEl.hidden = false;
 }

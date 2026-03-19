@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 
 from .sec_fetcher import EDGAR_ARCHIVE_URL, EDGAR_DATA_URL, HEADERS, get_cik
 
-MAX_TRANSCRIPTS   = 12
+MAX_TRANSCRIPTS   = 4
 _TRANSCRIPT_ITEMS = frozenset({"2.02", "7.01"})
 _SKIP_KEYWORDS    = ("press release", "news release", "financial results")
 

@@ -1,6 +1,6 @@
 """
-DCF calculator — fetches ACTUALS_YEARS of income statement, cash-flow, and
-balance-sheet data from FMP, then computes an equity-basis 5-year DCF.
+DCF calculator — accepts pre-fetched EDGAR financial data and Alpaca quote,
+then computes an equity-basis 5-year DCF.
 
 Valuation approach
 ------------------
@@ -10,32 +10,23 @@ Valuation approach
   Intrinsic value per share = (PV of FCFs + PV of Terminal Value)
                               / base diluted shares
 
-Requires FMP_API_KEY in the environment (loaded from .env).
+Data sources: SEC EDGAR (via EdgarFinancials) + Alpaca (via AlpacaQuote).
 """
 
-import os
 from dataclasses import dataclass
 from typing import List, Optional
 
-import requests
-from dotenv import find_dotenv, load_dotenv
-
+from .alpaca_client import AlpacaQuote
 from .config import (
-    ACTUALS_YEARS,
     DEFAULT_BETA,
     DEFAULT_EXIT_PE,
     PROJECTION_YEARS,
     TAX_RATE,
 )
-from .industry_classifier import SectorInfo
+from .edgar_extractor import EdgarFinancials
 from .industry_config import SectorRules, get_sector_rules
+from .industry_profiles import IndustryProfile
 from .market_data import get_equity_risk_premium, get_risk_free_rate
-
-_dotenv_path = find_dotenv()
-print(f"[DCF] .env path resolved to: {_dotenv_path!r}")
-load_dotenv(_dotenv_path, override=True)
-
-FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
 
 # ── Per-year data container ────────────────────────────────────────────────────
@@ -99,33 +90,6 @@ class DCFResult:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_api_key() -> str:
-    key = os.getenv("FMP_API_KEY")
-    if not key:
-        print("[DCF] ERROR: FMP_API_KEY not found in environment after load_dotenv.")
-        raise EnvironmentError("FMP_API_KEY is not set. Add it to your .env file.")
-    print(f"[DCF] FMP_API_KEY loaded OK: {key[:4]}...{key[-4:]} (length={len(key)})")
-    return key
-
-
-def _fetch(endpoint: str, api_key: str, **params) -> list:
-    """GET a FMP stable endpoint and return the parsed JSON list."""
-    params["apikey"] = api_key
-    url = f"{FMP_BASE_URL}/{endpoint}"
-
-    prepared = requests.Request("GET", url, params=params).prepare()
-    print(f"[DCF] GET {prepared.url}")
-
-    resp = requests.get(url, params=params, timeout=15)
-    print(f"[DCF] Status: {resp.status_code} | Body[:500]: {resp.text[:500]}")
-
-    resp.raise_for_status()
-    data = resp.json()
-    if not data:
-        raise ValueError(f"FMP returned empty data for: {endpoint}")
-    return data
-
-
 def _weighted_growth(values: List[float], sector_rules: SectorRules) -> float:
     """
     Compute a recency-weighted average growth rate (newest value first).
@@ -188,58 +152,41 @@ def _compute_initial_projections(
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResult:
+def fetch_dcf(
+    ticker: str,
+    edgar_data: EdgarFinancials,
+    quote: AlpacaQuote,
+    profile: IndustryProfile,
+) -> DCFResult:
     """
-    Fetch FMP financial data and compute an equity-basis DCF intrinsic value.
+    Compute an equity-basis DCF intrinsic value from EDGAR financial data.
+
+    Parameters
+    ----------
+    ticker       : Stock ticker symbol.
+    edgar_data   : Pre-fetched EDGAR financial data (5 years, oldest→newest).
+    quote        : Live price and beta from Alpaca.
+    profile      : Industry profile with sector-specific rules.
 
     Returns
     -------
     DCFResult with historical actuals, CAPM inputs, base assumptions, and
     initial valuation bridge components.
-
-    Raises
-    ------
-    EnvironmentError  if FMP_API_KEY is not set.
-    ValueError        if required data is missing or insufficient.
     """
-    api_key = _get_api_key()
-    ticker  = ticker.upper()
+    ticker = ticker.upper()
+    current_price = quote.price
+    if current_price <= 0:
+        raise ValueError(f"Current price unavailable for {ticker}")
 
-    # ── Step 1: fetch raw data ────────────────────────────────────────────────
-    try:
-        income_stmts   = _fetch("income-statement",        api_key, symbol=ticker, limit=ACTUALS_YEARS)
-        cash_flows     = _fetch("cash-flow-statement",     api_key, symbol=ticker, limit=ACTUALS_YEARS)
-        balance_sheets = _fetch("balance-sheet-statement", api_key, symbol=ticker, limit=ACTUALS_YEARS)
-        quotes         = _fetch("quote",                   api_key, symbol=ticker)
-    except Exception as exc:
-        print(f"[DCF] FAILED step 1 (data fetch): {type(exc).__name__}: {exc}")
-        raise
+    # ── Beta ──────────────────────────────────────────────────────────────
+    beta = quote.beta if quote.beta and quote.beta > 0 else DEFAULT_BETA
+    print(f"[DCF] current_price={current_price}  beta={beta:.4f}")
 
-    # ── Step 2: parse quote ───────────────────────────────────────────────────
-    try:
-        quote            = quotes[0]
-        current_price    = float(quote.get("price") or 0)
-        market_cap_quote = float(quote.get("marketCap") or 0)
-        if current_price <= 0:
-            raise ValueError(f"price is {quote.get('price')!r} — missing or zero.")
-        if market_cap_quote <= 0:
-            raise ValueError(f"marketCap is {quote.get('marketCap')!r} — missing or zero.")
+    # ── Sector rules ──────────────────────────────────────────────────────
+    sector_rules = profile.sector_rules or get_sector_rules(edgar_data.sector)
+    print(f"[DCF] sector={edgar_data.sector!r}  rules={sector_rules.sector_label}")
 
-        profile_beta = sector_info.beta if sector_info else 0.0
-        quote_beta   = float(quote.get("beta") or 0)
-        raw_beta     = profile_beta if profile_beta > 0 else quote_beta
-        beta         = raw_beta if raw_beta > 0 else DEFAULT_BETA
-        print(f"[DCF] current_price={current_price}  beta={beta:.4f}")
-    except Exception as exc:
-        print(f"[DCF] FAILED step 2 (quote): {type(exc).__name__}: {exc}")
-        raise
-
-    # ── Sector rules ──────────────────────────────────────────────────────────
-    sector_label  = sector_info.sector if sector_info else ""
-    sector_rules: SectorRules = get_sector_rules(sector_label)
-    print(f"[DCF] sector={sector_label!r}  rules={sector_rules.sector_label}")
-
-    # ── Step 3: live market rates + CAPM cost of equity ───────────────────────
+    # ── CAPM cost of equity ───────────────────────────────────────────────
     try:
         risk_free_rate, rfr_source = get_risk_free_rate()
         equity_risk_premium, erp_source = get_equity_risk_premium()
@@ -250,68 +197,56 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
             f"Re={cost_of_equity:.4f}"
         )
     except Exception as exc:
-        print(f"[DCF] FAILED step 3 (market rates): {type(exc).__name__}: {exc}")
+        print(f"[DCF] FAILED (market rates): {type(exc).__name__}: {exc}")
         raise
 
-    # ── Step 4: align statements and build actuals list ───────────────────────
-    # All three FMP endpoints return data newest-first (index 0 = most recent).
-    # We align by index (best-effort across statement types) and reverse to
-    # produce an oldest → newest list for display.
+    # ── Build actuals from EDGAR data ─────────────────────────────────────
+    # EDGAR data is already oldest→newest, signs already normalised
     try:
-        n = min(len(income_stmts), len(cash_flows), len(balance_sheets))
-        if n < 2:
+        if len(edgar_data.years) < 2:
             raise ValueError(
-                f"Insufficient historical data: income={len(income_stmts)}, "
-                f"cashflow={len(cash_flows)}, balance={len(balance_sheets)}"
+                f"Insufficient historical data: {len(edgar_data.years)} years"
             )
 
         actuals: List[YearData] = []
-        for idx in range(n):
-            stmt = income_stmts[idx]
-            cf   = cash_flows[idx]
-            bs   = balance_sheets[idx]
-
-            _yr_raw = stmt.get("calendarYear") or stmt.get("date", "")[:4]
-            year    = int(_yr_raw) if str(_yr_raw).isdigit() else 0
-
-            revenue      = float(stmt.get("revenue") or 0)
-            op_income    = float(stmt.get("operatingIncome") or 0)
-            # FMP reports interestExpense as negative (cash outflow) — normalise
-            int_exp      = abs(float(stmt.get("interestExpense") or 0))
-            pretax       = float(stmt.get("incomeBeforeTax") or 0)
-            tax_exp      = abs(float(stmt.get("incomeTaxExpense") or 0))
-            net_income   = float(stmt.get("netIncome") or 0)
-            dil_shares   = float(stmt.get("weightedAverageShsOutDil") or 0)
-            eps          = float(stmt.get("epsDiluted") or 0)
-
-            # FMP reports capitalExpenditure as negative — normalise
-            capex = abs(float(cf.get("capitalExpenditure") or 0))
-            da    = float(cf.get("depreciationAndAmortization") or 0)
-            fcf   = net_income + da - capex
-
-            cash = float(
-                bs.get("cashAndCashEquivalents")
-                or bs.get("cashAndShortTermInvestments")
-                or 0
-            )
-            ltd     = float(bs.get("longTermDebt") or 0)
-            std     = float(bs.get("shortTermDebt") or 0)
+        for ey in edgar_data.years:
+            cash = ey.cash or 0.0
+            ltd = ey.long_term_debt or 0.0
+            std = ey.short_term_debt or 0.0
             net_dbt = ltd + std - cash
 
+            # Apply industry-specific substitutions
+            da = ey.depreciation_amortization
+            net_inc = ey.net_income
+            capex = ey.capex
+            fcf = net_inc + da - capex
+
+            # SBC addback for Technology
+            if profile.addback_sbc and ey.sbc:
+                fcf += ey.sbc
+
             actuals.append(YearData(
-                year=year, revenue=revenue, operating_income=op_income,
-                interest_expense=int_exp, pretax_income=pretax,
-                tax_expense=tax_exp, net_income=net_income,
-                diluted_shares=dil_shares, eps=eps,
-                capex=capex, da=da, fcf=fcf,
-                revenue_growth=None, shares_growth=None,
-                cash=cash, long_term_debt=ltd, short_term_debt=std, net_debt=net_dbt,
+                year=ey.fiscal_year,
+                revenue=ey.revenue,
+                operating_income=ey.operating_income or 0.0,
+                interest_expense=ey.interest_expense or 0.0,
+                pretax_income=ey.pretax_income or 0.0,
+                tax_expense=ey.income_tax or 0.0,
+                net_income=net_inc,
+                diluted_shares=ey.diluted_shares,
+                eps=ey.eps or (net_inc / ey.diluted_shares if ey.diluted_shares > 0 else 0.0),
+                capex=capex,
+                da=da,
+                fcf=fcf,
+                revenue_growth=None,
+                shares_growth=None,
+                cash=cash,
+                long_term_debt=ltd,
+                short_term_debt=std,
+                net_debt=net_dbt,
             ))
 
-        # Reverse to oldest → newest for display
-        actuals.reverse()
-
-        # Fill in y/y growth rates (first year stays None — no prior-year data)
+        # Fill in y/y growth rates (first year stays None)
         for i in range(1, len(actuals)):
             prev = actuals[i - 1]
             curr = actuals[i]
@@ -322,14 +257,14 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
                     (curr.diluted_shares - prev.diluted_shares) / prev.diluted_shares
                 )
 
-        print(f"[DCF] actuals aligned: {[a.year for a in actuals]}")
+        print(f"[DCF] actuals: {[a.year for a in actuals]}")
     except Exception as exc:
-        print(f"[DCF] FAILED step 4 (actuals): {type(exc).__name__}: {exc}")
+        print(f"[DCF] FAILED (actuals): {type(exc).__name__}: {exc}")
         raise
 
-    # ── Step 5: derive base assumptions from recent actuals ───────────────────
+    # ── Derive base assumptions from recent actuals ───────────────────────
     try:
-        last = actuals[-1]   # most recent year
+        last = actuals[-1]
 
         # Revenue growth: weighted avg of available y/y rates (newest first)
         rev_growths_newest_first = list(reversed([
@@ -361,10 +296,12 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
         # Clamp to [-0.15, +0.15]
         base_shares_growth = max(-0.15, min(0.15, base_shares_growth))
 
-        base_diluted_shares = (
-            last.diluted_shares if last.diluted_shares > 0
-            else market_cap_quote / current_price
-        )
+        # Shares: use EDGAR data, fall back to Alpaca market cap / price
+        base_diluted_shares = last.diluted_shares
+        if base_diluted_shares <= 0 and quote.market_cap and current_price > 0:
+            base_diluted_shares = quote.market_cap / current_price
+        if base_diluted_shares <= 0:
+            base_diluted_shares = edgar_data.shares_outstanding
 
         exit_pe_multiple = DEFAULT_EXIT_PE
 
@@ -378,10 +315,10 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
             f"exit_pe={exit_pe_multiple}"
         )
     except Exception as exc:
-        print(f"[DCF] FAILED step 5 (base assumptions): {type(exc).__name__}: {exc}")
+        print(f"[DCF] FAILED (base assumptions): {type(exc).__name__}: {exc}")
         raise
 
-    # ── Step 6: initial valuation ──────────────────────────────────────────────
+    # ── Initial valuation ─────────────────────────────────────────────────
     try:
         pv_fcfs, pv_tv, equity_value, intrinsic_value = _compute_initial_projections(
             base_revenue       = last.revenue,
@@ -407,7 +344,7 @@ def fetch_dcf(ticker: str, sector_info: Optional[SectorInfo] = None) -> DCFResul
             f"upside={upside_downside:.1f}%"
         )
     except Exception as exc:
-        print(f"[DCF] FAILED step 6 (initial valuation): {type(exc).__name__}: {exc}")
+        print(f"[DCF] FAILED (initial valuation): {type(exc).__name__}: {exc}")
         raise
 
     print(f"[DCF] SUCCESS for {ticker}")

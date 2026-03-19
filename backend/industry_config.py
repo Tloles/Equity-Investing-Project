@@ -127,6 +127,61 @@ _CONSUMER_STAPLES = SectorRules(
     ),
 )
 
+_REAL_ESTATE = SectorRules(
+    sector_label        = "Real Estate / REITs",
+    growth_recency_bias = 1.0,
+    growth_cap          = 0.15,
+    growth_floor        = 0.02,
+    wacc_cap            = None,
+    dcf_appropriate     = False,
+    dcf_warning         = (
+        "REIT valuations should use FFO (Funds From Operations) rather than net income. "
+        "D&A is typically large for REITs and distorts earnings-based DCF. "
+        "Prefer P/FFO, dividend yield, and NAV-based approaches."
+    ),
+    analyst_guidance    = (
+        "Focus on Funds From Operations (FFO), occupancy rates, same-property NOI growth, "
+        "and lease maturity profiles. Assess interest rate sensitivity, leverage (Debt/EBITDA), "
+        "dividend coverage, and the quality and location of the property portfolio."
+    ),
+)
+
+_UTILITIES = SectorRules(
+    sector_label        = "Utilities",
+    growth_recency_bias = 1.0,
+    growth_cap          = 0.10,   # utilities are low-growth by nature
+    growth_floor        = 0.01,
+    wacc_cap            = None,
+    dcf_appropriate     = True,
+    dcf_warning         = (
+        "Utility valuations are highly sensitive to regulatory rate decisions and "
+        "interest rate movements. Capital-intensive growth (rate base expansion) "
+        "may not translate to proportional earnings growth."
+    ),
+    analyst_guidance    = (
+        "Focus on regulatory environment, allowed ROE, rate base growth, and capital "
+        "expenditure plans. Assess dividend sustainability, interest rate sensitivity, "
+        "and the transition to renewable energy sources. Evaluate wildfire, weather, "
+        "and environmental regulatory risks."
+    ),
+)
+
+_INDUSTRIALS = SectorRules(
+    sector_label        = "Industrials",
+    growth_recency_bias = 1.0,
+    growth_cap          = 0.25,
+    growth_floor        = 0.02,
+    wacc_cap            = None,
+    dcf_appropriate     = True,
+    dcf_warning         = None,
+    analyst_guidance    = (
+        "Focus on order backlog trends, capacity utilisation, and margin cyclicality. "
+        "Assess exposure to capex cycles, government infrastructure spending, and "
+        "supply chain disruptions. Evaluate management's M&A strategy and organic "
+        "vs. acquisition-driven growth."
+    ),
+)
+
 _DEFAULT = SectorRules(
     sector_label        = "General",
     growth_recency_bias = 1.0,
@@ -163,4 +218,11 @@ def get_sector_rules(sector: str) -> SectorRules:
     if any(k in s for k in ("consumer staple", "consumer defensive", "food", "beverage",
                              "household", "retail")):
         return _CONSUMER_STAPLES
+    if any(k in s for k in ("real estate", "reit")):
+        return _REAL_ESTATE
+    if any(k in s for k in ("utilit", "electric", "water", "gas distribution")):
+        return _UTILITIES
+    if any(k in s for k in ("industrial", "aerospace", "defense", "machinery",
+                             "construction", "transportation")):
+        return _INDUSTRIALS
     return _DEFAULT

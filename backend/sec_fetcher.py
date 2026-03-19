@@ -127,7 +127,7 @@ def fetch_10k_sections(ticker: str) -> dict:
       - filing_urls      list of {year, url} for up to 3 recent 10-Ks
     """
     cik = get_cik(ticker)
-    filings = _get_recent_10ks(cik, n=3)
+    filings = _get_recent_10ks(cik, n=4)
     accession_number, primary_doc, filing_date = filings[0]  # most recent
     text = fetch_document_text(cik, accession_number, primary_doc)
 

@@ -3,6 +3,12 @@
 import time
 from typing import Any, Optional, Tuple
 
+# ── Named TTL constants (seconds) ────────────────────────────────────────────
+TTL_EDGAR_FINANCIALS = 604800    # 7 days — XBRL filings don't change often
+TTL_ALPACA_QUOTE     = 900       # 15 minutes — live price data
+TTL_SECTOR_PROFILE   = 2592000   # 30 days — SIC codes are stable
+TTL_MARKET_DATA      = 86400     # 24 hours — risk-free rate, ERP
+
 
 class TTLCache:
     """In-memory cache with per-entry time-to-live (TTL)."""

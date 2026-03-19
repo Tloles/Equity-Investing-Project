@@ -1,22 +1,14 @@
 """
-financials.py — fetches full income statement, balance sheet, and cash flow
-data from FMP and computes key financial ratios for the Financials tab.
+financials.py — builds full financial statement data and computes key ratios
+for the Financials tab, using pre-fetched EDGAR data.
 
-Requires FMP_API_KEY in the environment (loaded from .env).
+Data source: SEC EDGAR (via EdgarFinancials).
 """
 
-import os
 from dataclasses import dataclass
 from typing import List, Optional
 
-import requests
-from dotenv import find_dotenv, load_dotenv
-
-from .config import ACTUALS_YEARS
-
-load_dotenv(find_dotenv(), override=True)
-
-FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+from .edgar_extractor import EdgarFinancials
 
 
 # ── Data containers ───────────────────────────────────────────────────────────
@@ -94,24 +86,6 @@ class FinancialsResult:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_api_key() -> str:
-    key = os.getenv("FMP_API_KEY")
-    if not key:
-        raise EnvironmentError("FMP_API_KEY is not set. Add it to your .env file.")
-    return key
-
-
-def _fetch(endpoint: str, api_key: str, **params) -> list:
-    params["apikey"] = api_key
-    url = f"{FMP_BASE_URL}/{endpoint}"
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data:
-        raise ValueError(f"FMP returned empty data for: {endpoint}")
-    return data
-
-
 def _safe_div(num: float, denom: float) -> Optional[float]:
     """Return num/denom or None if denom is zero or negative."""
     if denom and denom != 0:
@@ -126,74 +100,62 @@ def _safe_pct(num: float, denom: float) -> Optional[float]:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def fetch_financials(ticker: str) -> FinancialsResult:
+def fetch_financials(ticker: str, edgar_data: EdgarFinancials) -> FinancialsResult:
     """
-    Fetch full financial statements from FMP and compute key ratios.
+    Build full financial statement data and compute key ratios from
+    EDGAR data.
+
+    Parameters
+    ----------
+    ticker     : Stock ticker symbol.
+    edgar_data : Pre-fetched EDGAR financial data (oldest→newest).
 
     Returns
     -------
     FinancialsResult with per-year financial data and computed ratios.
     """
-    api_key = _get_api_key()
     ticker = ticker.upper()
 
-    # Fetch all three statements
-    income_stmts = _fetch("income-statement", api_key, symbol=ticker, limit=ACTUALS_YEARS)
-    cash_flows = _fetch("cash-flow-statement", api_key, symbol=ticker, limit=ACTUALS_YEARS)
-    balance_sheets = _fetch("balance-sheet-statement", api_key, symbol=ticker, limit=ACTUALS_YEARS)
-
-    n = min(len(income_stmts), len(cash_flows), len(balance_sheets))
-    if n < 1:
-        raise ValueError(f"Insufficient financial data for {ticker}")
+    if not edgar_data.years:
+        raise ValueError(f"No financial data available for {ticker}")
 
     years: List[FinancialYear] = []
 
-    for idx in range(n):
-        stmt = income_stmts[idx]
-        cf = cash_flows[idx]
-        bs = balance_sheets[idx]
-
-        _yr_raw = stmt.get("calendarYear") or (stmt.get("date") or "")[:4]
-        year = int(_yr_raw) if str(_yr_raw).isdigit() else 0
-
+    for ey in edgar_data.years:
         # ── Income Statement fields ──
-        revenue = float(stmt.get("revenue") or 0)
-        cost_of_revenue = float(stmt.get("costOfRevenue") or 0)
-        gross_profit = float(stmt.get("grossProfit") or 0)
-        rd_expenses = float(stmt.get("researchAndDevelopmentExpenses") or 0)
-        sga_expenses = float(stmt.get("sellingGeneralAndAdministrativeExpenses") or 0)
-        operating_expenses = float(stmt.get("operatingExpenses") or 0)
-        operating_income = float(stmt.get("operatingIncome") or 0)
-        interest_expense = abs(float(stmt.get("interestExpense") or 0))
-        pretax_income = float(stmt.get("incomeBeforeTax") or 0)
-        tax_expense = abs(float(stmt.get("incomeTaxExpense") or 0))
-        net_income = float(stmt.get("netIncome") or 0)
-        ebitda = float(stmt.get("ebitda") or 0)
-        diluted_shares = float(stmt.get("weightedAverageShsOutDil") or 0)
-        eps = float(stmt.get("epsDiluted") or 0)
+        revenue = ey.revenue
+        cost_of_revenue = ey.cost_of_revenue or 0.0
+        gross_profit = ey.gross_profit or (revenue - cost_of_revenue)
+        rd_expenses = ey.rd_expenses or 0.0
+        sga_expenses = ey.sga_expenses or 0.0
+        operating_expenses = ey.operating_expenses or 0.0
+        operating_income = ey.operating_income or 0.0
+        interest_expense = ey.interest_expense or 0.0
+        pretax_income = ey.pretax_income or 0.0
+        tax_expense = ey.income_tax or 0.0
+        net_income = ey.net_income
+        ebitda = ey.ebitda or (operating_income + ey.depreciation_amortization)
+        diluted_shares = ey.diluted_shares
+        eps = ey.eps or (net_income / diluted_shares if diluted_shares > 0 else 0.0)
 
         # ── Balance Sheet fields ──
-        cash = float(
-            bs.get("cashAndCashEquivalents")
-            or bs.get("cashAndShortTermInvestments")
-            or 0
-        )
-        total_current_assets = float(bs.get("totalCurrentAssets") or 0)
-        total_assets = float(bs.get("totalAssets") or 0)
-        total_current_liabilities = float(bs.get("totalCurrentLiabilities") or 0)
-        long_term_debt = float(bs.get("longTermDebt") or 0)
-        short_term_debt = float(bs.get("shortTermDebt") or 0)
-        total_debt = long_term_debt + short_term_debt
-        total_liabilities = float(bs.get("totalLiabilities") or 0)
-        total_equity = float(bs.get("totalStockholdersEquity") or 0)
+        cash = ey.cash or 0.0
+        total_current_assets = ey.current_assets or 0.0
+        total_assets = ey.total_assets or 0.0
+        total_current_liabilities = ey.current_liabilities or 0.0
+        ltd = ey.long_term_debt or 0.0
+        std = ey.short_term_debt or 0.0
+        total_debt = ltd + std
+        total_liabilities = ey.total_liabilities or 0.0
+        total_equity = ey.total_equity or 0.0
 
         # ── Cash Flow fields ──
-        operating_cash_flow = float(cf.get("operatingCashFlow") or 0)
-        capex = abs(float(cf.get("capitalExpenditure") or 0))
-        free_cash_flow = float(cf.get("freeCashFlow") or (operating_cash_flow - capex))
-        dividends_paid = abs(float(cf.get("dividendsPaid") or 0))
-        share_repurchases = abs(float(cf.get("commonStockRepurchased") or 0))
-        da = float(cf.get("depreciationAndAmortization") or 0)
+        operating_cash_flow = ey.operating_cash_flow or 0.0
+        capex = ey.capex
+        free_cash_flow = ey.fcf or (net_income + ey.depreciation_amortization - capex)
+        dividends_paid = ey.dividends_paid or 0.0
+        share_repurchases = ey.share_repurchases or 0.0
+        da = ey.depreciation_amortization
 
         # ── Compute Ratios ──
         gross_margin = _safe_pct(gross_profit, revenue)
@@ -203,7 +165,6 @@ def fetch_financials(ticker: str) -> FinancialsResult:
         roa = _safe_pct(net_income, total_assets)
 
         # ROIC = NOPAT / Invested Capital
-        # NOPAT = operating_income * (1 - tax_rate)
         tax_rate = tax_expense / pretax_income if pretax_income > 0 else 0.21
         nopat = operating_income * (1 - tax_rate)
         invested_capital = total_equity + total_debt - cash
@@ -217,7 +178,7 @@ def fetch_financials(ticker: str) -> FinancialsResult:
         fcf_per_share = _safe_div(free_cash_flow, diluted_shares)
 
         years.append(FinancialYear(
-            year=year,
+            year=ey.fiscal_year,
             revenue=revenue,
             cost_of_revenue=cost_of_revenue,
             gross_profit=gross_profit,
@@ -261,8 +222,7 @@ def fetch_financials(ticker: str) -> FinancialsResult:
             fcf_per_share=round(fcf_per_share, 2) if fcf_per_share is not None else None,
         ))
 
-    # Reverse to oldest → newest
-    years.reverse()
+    # Data is already oldest → newest from EDGAR
 
     # Compute y/y growth rates
     for i in range(1, len(years)):

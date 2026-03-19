@@ -65,7 +65,11 @@ class CompsResult:
     median_ev_ebitda: Optional[float] = None
     median_ps: Optional[float] = None
     median_pb: Optional[float] = None
-
+# Implied prices (median × target's metric)
+    pe_implied: Optional[float] = None
+    ev_ebitda_implied: Optional[float] = None
+    ps_implied: Optional[float] = None
+    pb_implied: Optional[float] = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -219,13 +223,26 @@ def fetch_comps(ticker: str, finviz_peers: list = None) -> CompsResult:
     # Step 3: Compute medians (excluding target)
     peer_entries = [e for e in entries if not e.is_target]
 
+    med_pe = _median([e.pe_ratio for e in peer_entries])
+    med_ev = _median([e.ev_to_ebitda for e in peer_entries])
+    med_ps = _median([e.price_to_sales for e in peer_entries])
+    med_pb = _median([e.price_to_book for e in peer_entries])
+
+    # Implied prices: target_price × (peer_median / target_multiple)
+    target = next((e for e in entries if e.is_target), None)
+    tp = target.price if target else 0
+
     result = CompsResult(
         ticker=ticker,
         peers=entries,
-        median_pe=_median([e.pe_ratio for e in peer_entries]),
-        median_ev_ebitda=_median([e.ev_to_ebitda for e in peer_entries]),
-        median_ps=_median([e.price_to_sales for e in peer_entries]),
-        median_pb=_median([e.price_to_book for e in peer_entries]),
+        median_pe=med_pe,
+        median_ev_ebitda=med_ev,
+        median_ps=med_ps,
+        median_pb=med_pb,
+        pe_implied=tp * (med_pe / target.pe_ratio) if target and target.pe_ratio and med_pe else None,
+        ev_ebitda_implied=tp * (med_ev / target.ev_to_ebitda) if target and target.ev_to_ebitda and med_ev else None,
+        ps_implied=tp * (med_ps / target.price_to_sales) if target and target.price_to_sales and med_ps else None,
+        pb_implied=tp * (med_pb / target.price_to_book) if target and target.price_to_book and med_pb else None,
     )
 
     print(
